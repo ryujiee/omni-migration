@@ -1,8 +1,13 @@
+// main.js
+'use strict';
+
+require('dotenv').config();
 const inquirer = require('inquirer');
 const chalk = require('chalk');
 const fs = require('fs-extra');
 const path = require('path');
 const runStep = require('./utils/migrationRunner');
+const { buildContext } = require('./utils/context');
 
 const steps = [
   { name: 'Tenants', func: require('./migrations/migrateTenants') },
@@ -25,14 +30,28 @@ const steps = [
   { name: 'MediaFiles', func: require('./migrations/migrateMedia') }
 ];
 
-const progressPath = path.resolve(__dirname, 'progress.json');
-
 async function run() {
+  const ctx = buildContext();
+  const scopeKey = ctx.isSingleTenant ? `tenant-${ctx.tenantId}` : 'all-tenants';
+  const progressPath = path.resolve(__dirname, `progress-${scopeKey}.json`);
+
+  console.log(
+    chalk.cyan.bold(
+      ctx.isSingleTenant
+        ? `🏷️  Modo: SINGLE TENANT (TENANT_ID=${ctx.tenantId})`
+        : '🌍 Modo: FULL (todos os tenants)'
+    )
+  );
+
   let lastCompletedIndex = -1;
 
   if (fs.existsSync(progressPath)) {
-    const progress = await fs.readJson(progressPath);
-    lastCompletedIndex = steps.findIndex(s => s.name === progress.lastCompleted);
+    try {
+      const progress = await fs.readJson(progressPath);
+      lastCompletedIndex = steps.findIndex(s => s.name === progress.lastCompleted);
+    } catch (e) {
+      console.log(chalk.yellow('⚠️  Não foi possível ler o progress anterior. Reiniciando do início.'));
+    }
   }
 
   for (let i = lastCompletedIndex + 1; i < steps.length; i++) {
@@ -51,7 +70,7 @@ async function run() {
       continue;
     }
 
-    const success = await runStep(step.name, step.func);
+    const success = await runStep(step.name, step.func, ctx);
     if (!success) {
       console.log(chalk.red(`❌ Parando execução. Corrija o erro e reexecute.`));
       process.exit(1);

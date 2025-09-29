@@ -1,38 +1,59 @@
-const ora = require('ora').default;
+// utils/migrationRunner.js
+'use strict';
+
+const oraPkg = require('ora');
+const ora = oraPkg.default || oraPkg; // compat ESM/CJS
 const chalk = require('chalk');
 const fs = require('fs-extra');
 const path = require('path');
 
-const logDir = path.resolve(__dirname, '../logs');
-fs.ensureDirSync(logDir);
+module.exports = async function runStep(name, fn, ctx = {}) {
+  const scopeKey = ctx.isSingleTenant ? `tenant-${ctx.tenantId}` : 'all-tenants';
+  const logDir = path.resolve(__dirname, '../logs', scopeKey);
+  fs.ensureDirSync(logDir);
 
-module.exports = async function runStep(name, fn) {
-  const spinner = ora(`Executando "${name}"...`).start();
-  const logFile = path.join(logDir, `migration-${name}.log`);
+  const startAt = new Date();
+  const timestamp = startAt.toISOString().replace(/[:.]/g, '-');
+  const logFile = path.join(logDir, `migration-${name}.log`); // mantém append por etapa
   const logStream = fs.createWriteStream(logFile, { flags: 'a' });
 
-  // Redirecionar console para o arquivo
+  const spinner = ora({
+    text: `Executando "${name}" (${scopeKey})...`,
+    discardStdin: false
+  }).start();
+
+  // Header do log
+  logStream.write(`\n===== [${startAt.toISOString()}] STEP: ${name} | SCOPE: ${scopeKey} =====\n`);
+
+  // Redireciona console para o arquivo (sem perder saída no terminal)
   const originalConsoleLog = console.log;
   const originalConsoleError = console.error;
+
   console.log = (...args) => {
-    originalConsoleLog(...args);
-    logStream.write(args.join(' ') + '\n');
+    const line = args.map(String).join(' ');
+    originalConsoleLog(line);
+    logStream.write(`[LOG ${new Date().toISOString()}] ${line}\n`);
   };
+
   console.error = (...args) => {
-    originalConsoleError(...args);
-    logStream.write('[ERRO] ' + args.join(' ') + '\n');
+    const line = args.map(String).join(' ');
+    originalConsoleError(line);
+    logStream.write(`[ERRO ${new Date().toISOString()}] ${line}\n`);
   };
 
   try {
-    await fn();
-    spinner.succeed(`✅ ${name} executado com sucesso.`);
+    await fn(ctx); // <<<<<<<<<< repassa o contexto para a migration
+    const ms = Date.now() - startAt.getTime();
+    spinner.succeed(`✅ ${name} executado com sucesso (${(ms / 1000).toFixed(2)}s).`);
+    logStream.write(`----- SUCESSO em ${ms} ms -----\n`);
     return true;
   } catch (err) {
-    spinner.fail(`❌ Falha em ${name}: ${err.message}`);
-    logStream.write(`[${new Date().toISOString()}] ${err.stack}\n`);
+    const ms = Date.now() - startAt.getTime();
+    spinner.fail(`❌ Falha em ${name} (${(ms / 1000).toFixed(2)}s): ${err.message}`);
+    logStream.write(`[${new Date().toISOString()}] STACK:\n${err.stack || err}\n`);
     return false;
   } finally {
-    // Restaurar console padrão
+    // Restaura console
     console.log = originalConsoleLog;
     console.error = originalConsoleError;
     logStream.end();

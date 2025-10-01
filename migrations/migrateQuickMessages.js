@@ -12,6 +12,10 @@ module.exports = async function migrateQuickMessages(ctx = {}) {
   // 6 params/linha → 5000 linhas ≈ 30k params (< 65535)
   const BATCH_SIZE = Number(process.env.BATCH_SIZE || 3000);
 
+  // CHANGED: id de grupo para adicionar aos usuários (opcional)
+  const ADD_GROUP_TO_USERS = process.env.ADD_GROUP_TO_USERS === '1'; // "1" para habilitar
+  const GROUP_ID = Number(process.env.GROUP_ID || 1);
+
   // Usa TENANT_ID do ctx (preferencial) ou do .env
   const tenantId =
     ctx.tenantId != null && String(ctx.tenantId).trim() !== ''
@@ -81,7 +85,7 @@ module.exports = async function migrateQuickMessages(ctx = {}) {
 
     // 4) UPSERT base
     const upsertSqlSingle = `
-      INSERT INTO quick_messages (
+      INSERT INTO public.quick_messages (
         id, name, messages, company_id, created_at, updated_at
       ) VALUES (
         $1, $2, $3::jsonb, $4, $5, $6
@@ -111,6 +115,8 @@ module.exports = async function migrateQuickMessages(ctx = {}) {
 
       batch.forEach((row, i) => {
         const name = safeName(row.name, row.id);
+
+        // CHANGED: transformar mensagens para o NOVO formato
         const msgs = normalizeMessages(row.messages);
 
         const v = [
@@ -134,7 +140,7 @@ module.exports = async function migrateQuickMessages(ctx = {}) {
         await dest.query('SET LOCAL synchronous_commit TO OFF');
         await dest.query(
           `
-          INSERT INTO quick_messages (
+          INSERT INTO public.quick_messages (
             id, name, messages, company_id, created_at, updated_at
           ) VALUES
             ${placeholders.join(',')}
@@ -174,8 +180,17 @@ module.exports = async function migrateQuickMessages(ctx = {}) {
 
     bar.stop();
     await new Promise((resolve, reject) => cursor.close(err => (err ? reject(err) : resolve())));
+
+    // CHANGED: (opcional) adicionar GROUP_ID para todos usuários do tenant
+    if (ADD_GROUP_TO_USERS) {
+      await addGroupToAllUsers(dest, tenantId, GROUP_ID);
+    }
+
     const secs = ((Date.now() - startedAt) / 1000).toFixed(1);
     console.log(`✅ Migradas ${migradas}/${total} quick_messages em ${secs}s.${erros ? ` (${erros} com erro)` : ''}`);
+    if (ADD_GROUP_TO_USERS) {
+      console.log(`✅ Grupo ${GROUP_ID} adicionado ao array quick_message_groups de todos os usuários${tenantId ? ` do tenant ${tenantId}` : ''}.`);
+    }
   } finally {
     await source.end();
     await dest.end();
@@ -190,13 +205,108 @@ function parseJson(v) {
   }
   return v; // já é objeto/array
 }
+
+// CHANGED: normaliza para o NOVO formato de mensagens
 function normalizeMessages(v) {
   const parsed = parseJson(v);
-  if (Array.isArray(parsed)) return parsed;
-  if (parsed && typeof parsed === 'object') return parsed; // objeto estruturado
-  return []; // fallback
+
+  // Se já vier no novo formato, apenas retorna (sanitizando minimamente)
+  if (Array.isArray(parsed) && parsed.every(isNewMsgShape)) {
+    return dedupeByShortcut(parsed.map(sanitizeNewMsg));
+  }
+
+  // Se vier no formato antigo [{key, message}]
+  if (Array.isArray(parsed) && parsed.every(isOldMsgShape)) {
+    const base = Date.now();
+    const converted = parsed.map((it, idx) => ({
+      _key: `${base + idx}-${Math.random()}`,
+      shortcut: toShortcut(it.key),
+      content: String(it.message ?? ''),
+      active: true
+    }));
+    return dedupeByShortcut(converted);
+  }
+
+  // Se vier string (raro), encapsula em 1 item
+  if (typeof parsed === 'string') {
+    return [{
+      _key: `${Date.now()}-${Math.random()}`,
+      shortcut: '/msg',
+      content: parsed,
+      active: true
+    }];
+  }
+
+  // Qualquer outra coisa vira array vazio (evita quebrar)
+  return [];
 }
+
+// --------- checagens/normalizações do novo/antigo formato ---------
+function isOldMsgShape(x) {
+  return x && typeof x === 'object' && 'key' in x && 'message' in x;
+}
+function isNewMsgShape(x) {
+  return x && typeof x === 'object' &&
+    '_key' in x && 'shortcut' in x && 'content' in x && 'active' in x;
+}
+function sanitizeNewMsg(x) {
+  return {
+    _key: String(x._key || `${Date.now()}-${Math.random()}`),
+    shortcut: toShortcut(x.shortcut),
+    content: String(x.content ?? ''),
+    active: Boolean(x.active !== false)
+  };
+}
+
+// CHANGED: prefixo opcional com "/" (ativar com env)
+function toShortcut(s) {
+  const str = String(s ?? '').trim();
+  if (!str) return '/vazio';
+  if (process.env.NORMALIZE_SHORTCUT_SLASH === '1') {
+    return str.startsWith('/') ? str : `/${str}`;
+  }
+  return str;
+}
+
+// Remove duplicados por "shortcut" (mantém o primeiro)
+function dedupeByShortcut(arr) {
+  const seen = new Set();
+  const out = [];
+  for (const it of arr) {
+    const k = (it.shortcut || '').toLowerCase();
+    if (!seen.has(k)) {
+      seen.add(k);
+      out.push(it);
+    }
+  }
+  return out;
+}
+
 function safeName(name, id) {
   const n = (name || '').toString().trim();
   return n.length ? n : `Sem nome (${id})`;
+}
+
+// CHANGED: adiciona GROUP_ID em quick_message_groups de todos usuários (tenant opcional)
+async function addGroupToAllUsers(dest, tenantId, groupId) {
+  const sql = `
+    UPDATE public.users
+    SET quick_message_groups = CASE
+      WHEN quick_message_groups IS NULL THEN ARRAY[$1]::integer[]
+      WHEN $1 = ANY(quick_message_groups) THEN quick_message_groups
+      ELSE array_append(quick_message_groups, $1)
+    END,
+    updated_at = NOW()
+    ${tenantId ? 'WHERE company_id = $2' : ''}
+  `;
+  const params = tenantId ? [groupId, tenantId] : [groupId];
+
+  await dest.query('BEGIN');
+  try {
+    await dest.query(sql, params);
+    await dest.query('COMMIT');
+  } catch (e) {
+    await dest.query('ROLLBACK');
+    console.error(`❌ Erro ao atualizar quick_message_groups: ${e.message}`);
+  }
 }

@@ -1,4 +1,3 @@
-// migrations/migrateInternalMessages.batched.js
 'use strict';
 
 require('dotenv').config();
@@ -6,13 +5,13 @@ const { Client } = require('pg');
 const Cursor = require('pg-cursor');
 const cliProgress = require('cli-progress');
 
-module.exports = async function migrateInternalMessages(ctx = {}) {
-  console.log('📨 Migrando "InternalMessage" → "internal_messages"...');
+module.exports = async function migratePrivateMessages(ctx = {}) {
+  console.log('📨 Migrando "PrivateMessage" → "internal_messages"... (batched + progress + schema-aware)');
 
-  // 12 params/linha (media_name='' e is_deleted=false são literais) → 3000 linhas ≈ 36k params
-  const BATCH_SIZE = Number(process.env.BATCH_SIZE || 3000);
+  // cuidado com limite de parâmetros: ~ 65535
+  const BATCH_SIZE = Number(process.env.BATCH_SIZE || 2000);
+  const PROGRESS_EVERY = Number(process.env.INTERNAL_PROGRESS_EVERY || 200);
 
-  // Usa TENANT_ID do ctx (preferencial) ou do .env
   const tenantId =
     ctx.tenantId != null && String(ctx.tenantId).trim() !== ''
       ? String(ctx.tenantId).trim()
@@ -24,7 +23,7 @@ module.exports = async function migrateInternalMessages(ctx = {}) {
     user: process.env.SRC_USER,
     password: process.env.SRC_PASS,
     database: process.env.SRC_DB,
-    application_name: 'migrateInternalMessages:source'
+    application_name: 'migratePrivateMessages:source',
   });
 
   const dest = new Client({
@@ -33,34 +32,58 @@ module.exports = async function migrateInternalMessages(ctx = {}) {
     user: process.env.DST_USER,
     password: process.env.DST_PASS,
     database: process.env.DST_DB,
-    application_name: 'migrateInternalMessages:dest'
+    application_name: 'migratePrivateMessages:dest',
   });
 
   await source.connect();
   await dest.connect();
 
+  let cursor;
+  const bar = new cliProgress.SingleBar(
+    {
+      format:
+        'Internal |{bar}| {percentage}% | {value}/{total} | ETA: {eta_formatted} | {rate} r/s | {status}',
+      hideCursor: true,
+      clearOnComplete: false,
+    },
+    cliProgress.Presets.shades_classic,
+  );
+
   try {
-    // —— COUNT para barra/ETA
+    // 0) Detectar colunas do DEST
+    const destCols = await loadDestColumns(dest, 'internal_messages');
+    const has = (c) => destCols.has(String(c).toLowerCase());
+
+    // 1) Pré-carregar users válidos (FK)
+    const whereCompany = tenantId ? 'WHERE company_id=$1' : '';
+    const pCompany = tenantId ? [tenantId] : [];
+
+    // users sempre é importante para sender_id
+    const usersRes = await dest.query(`SELECT id FROM users ${whereCompany}`, pCompany).catch(() => ({ rows: [] }));
+    const validUsers = new Set(usersRes.rows.map((r) => Number(r.id)));
+
+    // 2) COUNT + SELECT (origem)
     let countSql, countParams, selectSql, selectParams;
+
     if (tenantId) {
       countSql = `
         SELECT COUNT(*)::bigint AS total
-        FROM "public"."InternalMessage" im
-        WHERE EXISTS (SELECT 1 FROM "public"."Users" u WHERE u.id = im."senderId" AND u."tenantId" = $1)
+        FROM "public"."PrivateMessage" im
+        WHERE EXISTS (SELECT 1 FROM "public"."Users" u  WHERE u.id  = im."senderId"   AND u."tenantId" = $1)
            OR EXISTS (SELECT 1 FROM "public"."Users" u2 WHERE u2.id = im."receiverId" AND u2."tenantId" = $1)
       `;
       selectSql = `
-        SELECT *
-        FROM "public"."InternalMessage" im
-        WHERE EXISTS (SELECT 1 FROM "public"."Users" u WHERE u.id = im."senderId" AND u."tenantId" = $1)
+        SELECT im.*
+        FROM "public"."PrivateMessage" im
+        WHERE EXISTS (SELECT 1 FROM "public"."Users" u  WHERE u.id  = im."senderId"   AND u."tenantId" = $1)
            OR EXISTS (SELECT 1 FROM "public"."Users" u2 WHERE u2.id = im."receiverId" AND u2."tenantId" = $1)
         ORDER BY im.id
       `;
       countParams = [tenantId];
       selectParams = [tenantId];
     } else {
-      countSql = `SELECT COUNT(*)::bigint AS total FROM "public"."InternalMessage"`;
-      selectSql = `SELECT * FROM "public"."InternalMessage" ORDER BY id`;
+      countSql = `SELECT COUNT(*)::bigint AS total FROM "public"."PrivateMessage"`;
+      selectSql = `SELECT * FROM "public"."PrivateMessage" ORDER BY id`;
       countParams = [];
       selectParams = [];
     }
@@ -69,173 +92,244 @@ module.exports = async function migrateInternalMessages(ctx = {}) {
     const total = Number(countRes.rows[0]?.total || 0);
 
     if (!total) {
-      console.log(
-        tenantId
-          ? `⚠️  Nenhuma InternalMessage para TENANT_ID=${tenantId}.`
-          : '⚠️  Nenhuma InternalMessage na origem.'
-      );
+      console.log(tenantId ? `⚠️ Nenhuma PrivateMessage para TENANT_ID=${tenantId}.` : '⚠️ Nenhuma PrivateMessage na origem.');
       return;
     }
+    console.log(`📦 Total na origem${tenantId ? ` (tenant ${tenantId})` : ''}: ${total}`);
 
-    // —— Cursor server-side
-    const cursor = source.query(new Cursor(selectSql, selectParams));
+    cursor = source.query(new Cursor(selectSql, selectParams));
 
-    // —— Barra de progresso
-    const bar = new cliProgress.SingleBar(
-      { format: 'Progresso |{bar}| {percentage}% | {value}/{total} | ETA: {eta_formatted} | {rate} r/s', hideCursor: true },
-      cliProgress.Presets.shades_classic
-    );
-    bar.start(total, 0, { rate: '0.0' });
+    // 3) Colunas alvo (dinâmicas)
+    const targetCols = [
+      'id',
+      has('body') ? 'body' : null,
+      has('media_type') ? 'media_type' : null,
+      has('media_name') ? 'media_name' : null,
+      has('media_url') ? 'media_url' : null,
+      has('data_json') ? 'data_json' : null,
+      has('ack') ? 'ack' : null,
+
+      // novos campos no destino (se existirem)
+      has('quoted_message_id') ? 'quoted_message_id' : null,
+      has('edited_at') ? 'edited_at' : null,
+      has('edited_message') ? 'edited_message' : null,
+      has('is_deleted') ? 'is_deleted' : null,
+      has('deleted_at') ? 'deleted_at' : null,
+
+      has('sender_id') ? 'sender_id' : null,
+      has('recipient_id') ? 'recipient_id' : null,
+      has('group_id') ? 'group_id' : null,
+      has('is_group_message') ? 'is_group_message' : null,
+
+      has('reactions') ? 'reactions' : null,
+      has('forwarded_from_id') ? 'forwarded_from_id' : null,
+
+      has('created_at') ? 'created_at' : null,
+      has('updated_at') ? 'updated_at' : null,
+    ].filter(Boolean);
+
+    const insertColsSql = targetCols.join(', ');
+    const updateColsSql = targetCols
+      .filter((c) => c !== 'id' && c !== 'created_at')
+      .map((c) => `${c}=EXCLUDED.${c}`)
+      .join(', ');
 
     const startedAt = Date.now();
     let processed = 0;
-    let migradas = 0;
-    let erros = 0;
+    let migrated = 0;
+    let skipped = 0;
+    let errors = 0;
+    let skippedMissingSender = 0;
 
-    // —— UPSERT (media_name='' e is_deleted=false)
-    const upsertSqlSingle = `
-      INSERT INTO internal_messages (
-        id, body, media_type, media_name, media_url, data_json, ack,
-        is_deleted, sender_id, recipient_id, group_id, is_group_message,
-        created_at, updated_at
-      ) VALUES (
-        $1, $2, $3, '', $4, $5::jsonb, $6,
-        false, $7, $8, $9, $10,
-        $11, $12
-      )
-      ON CONFLICT (id) DO UPDATE SET
-        body             = EXCLUDED.body,
-        media_type       = EXCLUDED.media_type,
-        media_url        = EXCLUDED.media_url,
-        data_json        = EXCLUDED.data_json,
-        ack              = EXCLUDED.ack,
-        is_deleted       = EXCLUDED.is_deleted,
-        sender_id        = EXCLUDED.sender_id,
-        recipient_id     = EXCLUDED.recipient_id,
-        group_id         = EXCLUDED.group_id,
-        is_group_message = EXCLUDED.is_group_message,
-        updated_at       = EXCLUDED.updated_at
-    `;
+    bar.start(total, 0, { rate: '0.0', status: 'Iniciando...' });
 
-    // —— Loop por lote
     while (true) {
-      const batch = await new Promise((resolve, reject) => {
-        cursor.read(BATCH_SIZE, (err, r) => (err ? reject(err) : resolve(r)));
-      });
+      const batch = await readCursor(cursor, BATCH_SIZE);
       if (!batch || batch.length === 0) break;
 
-      const placeholders = [];
       const values = [];
-      const perRowParams = []; // fallback se batch falhar
+      const placeholders = [];
+      const perRowParams = [];
 
-      batch.forEach((row, i) => {
-        const id = get(row, 'id');
-        const body = get(row, 'text') || '';
-        const mediaType = normalizeMedia(get(row, 'mediaType'));
-        const mediaUrl = get(row, 'mediaUrl') || '';
-        const dataJson = JSON.stringify(parseJSON(get(row, 'dataJson')));
+      let rowIndex = 0;
+
+      for (const row of batch) {
+        const id = toInt(get(row, 'id'), null);
+        const senderId = toInt(get(row, 'senderId'), null);
+
+        // sender_id é obrigatório na model nova (uint, não pointer)
+        // se não existir no destino -> não tem como migrar sem criar usuário
+        if (!Number.isInteger(id) || !Number.isInteger(senderId) || !validUsers.has(senderId)) {
+          skipped++;
+          if (!Number.isInteger(senderId) || !validUsers.has(senderId)) skippedMissingSender++;
+          continue;
+        }
+
+        const body = sanitizeUtf16(get(row, 'text') || '');
+        const mediaType = sanitizeUtf16(normalizeMedia(get(row, 'mediaType')));
+        const mediaUrl = sanitizeUtf16(get(row, 'mediaUrl') || '');
+
+        const dataObj = parseJSON(get(row, 'dataJson'));
+        const dataJson = safeJsonb(dataObj);
+
         const ack = normalizeAck(get(row, 'read'));
-        const senderId = get(row, 'senderId') || null;
-        const recipientId = get(row, 'receiverId') || null;
-        const groupId = get(row, 'groupId') || null;
+
+        const recipientIdRaw = toInt(get(row, 'receiverId'), null);
+        const recipientId = Number.isInteger(recipientIdRaw) && validUsers.has(recipientIdRaw) ? recipientIdRaw : null;
+
+        const groupIdRaw = toInt(get(row, 'groupId'), null);
+        const groupId = Number.isInteger(groupIdRaw) ? groupIdRaw : null;
+
         const isGroup = !!groupId;
+
         const createdAt = get(row, 'createdAt');
         const updatedAt = get(row, 'updatedAt');
 
-        const v = [
-          id, body, mediaType, mediaUrl, dataJson, ack,
-          senderId, recipientId, groupId, isGroup, createdAt, updatedAt
-        ];
-        perRowParams.push(v);
+        const payloadObj = {
+          id,
+          body,
+          media_type: mediaType || 'text',
+          media_name: has('media_name') ? '' : undefined,
+          media_url: mediaUrl,
+          data_json: dataJson,
+          ack,
 
-        const base = i * 12;
-        placeholders.push(
-          `($${base + 1}, $${base + 2}, $${base + 3}, '', $${base + 4}, $${base + 5}::jsonb, $${base + 6}, false, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11}, $${base + 12})`
-        );
-        values.push(...v);
-      });
+          quoted_message_id: null,
+          edited_at: null,
+          edited_message: null,
 
-      if (placeholders.length === 0) {
+          is_deleted: false,
+          deleted_at: null,
+
+          sender_id: senderId,
+          recipient_id: recipientId,
+          group_id: groupId,
+          is_group_message: isGroup,
+
+          reactions: has('reactions') ? '[]' : undefined,
+          forwarded_from_id: null,
+
+          created_at: createdAt,
+          updated_at: updatedAt,
+        };
+
+        const rowVals = objToRow(targetCols, payloadObj);
+
+        perRowParams.push(rowVals);
+
+        const base = rowIndex * targetCols.length;
+        placeholders.push(`(${targetCols.map((_, j) => `$${base + j + 1}`).join(', ')})`);
+        values.push(...rowVals);
+        rowIndex++;
+      }
+
+      // nada válido no batch
+      if (!placeholders.length) {
         processed += batch.length;
-        const elapsed = (Date.now() - startedAt) / 1000;
-        bar.update(processed, { rate: (processed / Math.max(1, elapsed)).toFixed(1) });
+        tickBar(bar, processed, total, startedAt, PROGRESS_EVERY, `ok=${migrated} skip=${skipped} err=${errors} noSender=${skippedMissingSender}`);
         continue;
       }
 
-      // —— Execução do lote
+      const upsertBatchSql = `
+        INSERT INTO internal_messages (${insertColsSql})
+        VALUES ${placeholders.join(',')}
+        ON CONFLICT (id) DO UPDATE SET
+          ${updateColsSql}
+      `;
+
       try {
         await dest.query('BEGIN');
         await dest.query('SET LOCAL synchronous_commit TO OFF');
-        await dest.query(
-          `
-          INSERT INTO internal_messages (
-            id, body, media_type, media_name, media_url, data_json, ack,
-            is_deleted, sender_id, recipient_id, group_id, is_group_message,
-            created_at, updated_at
-          ) VALUES
-            ${placeholders.join(',')}
-          ON CONFLICT (id) DO UPDATE SET
-            body             = EXCLUDED.body,
-            media_type       = EXCLUDED.media_type,
-            media_url        = EXCLUDED.media_url,
-            data_json        = EXCLUDED.data_json,
-            ack              = EXCLUDED.ack,
-            is_deleted       = EXCLUDED.is_deleted,
-            sender_id        = EXCLUDED.sender_id,
-            recipient_id     = EXCLUDED.recipient_id,
-            group_id         = EXCLUDED.group_id,
-            is_group_message = EXCLUDED.is_group_message,
-            updated_at       = EXCLUDED.updated_at
-          `,
-          values
-        );
+        await dest.query(upsertBatchSql, values);
         await dest.query('COMMIT');
-        migradas += placeholders.length;
+        migrated += rowIndex;
       } catch (batchErr) {
-        await dest.query('ROLLBACK');
-        // —— fallback: registro a registro
+        try { await dest.query('ROLLBACK'); } catch {}
+
+        // fallback row-by-row pra isolar o erro sem travar tudo
         for (const v of perRowParams) {
           try {
+            const singleSql = makeSingleUpsert(targetCols);
             await dest.query('BEGIN');
             await dest.query('SET LOCAL synchronous_commit TO OFF');
-            await dest.query(upsertSqlSingle, v);
+            await dest.query(singleSql, v);
             await dest.query('COMMIT');
-            migradas += 1;
+            migrated += 1;
           } catch (rowErr) {
-            await dest.query('ROLLBACK');
-            erros += 1;
-            console.error(`❌ Erro ao migrar InternalMessage id=${v[0]}: ${rowErr.message}`);
+            try { await dest.query('ROLLBACK'); } catch {}
+            errors += 1;
+            // não spammar — deixa só 1 linha por erro (já é suficiente)
+            console.error(`❌ PrivateMessage id=${v[targetCols.indexOf('id')]}: ${rowErr.message}`);
           }
         }
       }
 
       processed += batch.length;
-      const elapsed = (Date.now() - startedAt) / 1000;
-      const rate = (processed / Math.max(1, elapsed)).toFixed(1);
-      bar.update(processed, { rate });
+      tickBar(bar, processed, total, startedAt, PROGRESS_EVERY, `ok=${migrated} skip=${skipped} err=${errors} noSender=${skippedMissingSender}`);
     }
 
     bar.stop();
-    await new Promise((resolve, reject) => cursor.close(err => (err ? reject(err) : resolve())));
+
     const secs = ((Date.now() - startedAt) / 1000).toFixed(1);
-    console.log(`✅ Migradas ${migradas}/${total} InternalMessage em ${secs}s. (${erros} com erro)`);
+    console.log(`✅ PrivateMessages: migrated=${migrated}, skipped=${skipped} (noSender=${skippedMissingSender}), errors=${errors} em ${secs}s`);
   } finally {
+    try {
+      if (cursor) await new Promise((resolve) => cursor.close(() => resolve()));
+    } catch {}
+    try { bar.stop(); } catch {}
     await source.end();
     await dest.end();
   }
 };
 
-// —— helpers
+/* ================= helpers ================= */
+
+async function loadDestColumns(client, tableName) {
+  const res = await client.query(
+    `
+    SELECT lower(column_name) AS column_name
+    FROM information_schema.columns
+    WHERE table_schema='public' AND table_name=$1
+    `,
+    [tableName],
+  );
+  return new Set(res.rows.map((r) => r.column_name));
+}
+
+async function readCursor(cursor, size) {
+  return await new Promise((resolve, reject) => {
+    cursor.read(size, (err, rows) => (err ? reject(err) : resolve(rows || [])));
+  });
+}
+
+function tickBar(bar, done, total, startedAtMs, every, status) {
+  if (done % every !== 0 && done !== total) return;
+  const elapsed = (Date.now() - startedAtMs) / 1000;
+  const rate = (done / Math.max(1, elapsed)).toFixed(1);
+  bar.update(done, { rate, status });
+}
+
+function objToRow(cols, obj) {
+  return cols.map((c) => (c in obj ? obj[c] : null));
+}
+
+function toInt(v, def = null) {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.trunc(n) : def;
+}
+
 function get(row, key) {
   if (key in row) return row[key];
-  const low = key.toLowerCase();
+  const low = String(key).toLowerCase();
   for (const k of Object.keys(row)) if (k.toLowerCase() === low) return row[k];
   return null;
 }
+
 function normalizeMedia(mt) {
   const v = String(mt || 'text');
   return ['conversation', 'extendedTextMessage', 'chat'].includes(v) ? 'text' : v;
 }
+
 function parseJSON(v) {
   if (v == null) return {};
   if (typeof v === 'string') {
@@ -243,7 +337,54 @@ function parseJSON(v) {
   }
   return typeof v === 'object' ? v : {};
 }
+
 function normalizeAck(readVal) {
   if (readVal === true || readVal === 1 || String(readVal).toLowerCase() === 'true') return 'read';
   return 'sent';
+}
+
+// remove NUL e surrogates inválidos
+function sanitizeUtf16(str) {
+  if (str == null) return str;
+  let s = String(str).replace(/\u0000/g, '');
+  s = s.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g, '\uFFFD');
+  s = s.replace(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '\uFFFD');
+  return s;
+}
+
+function deepSanitize(o) {
+  if (o == null) return o;
+  if (typeof o === 'string') return sanitizeUtf16(o);
+  if (Array.isArray(o)) return o.map(deepSanitize);
+  if (typeof o === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(o)) out[sanitizeUtf16(k)] = deepSanitize(v);
+    return out;
+  }
+  return o;
+}
+
+function safeJsonb(value, fallback = '{}') {
+  try {
+    const sani = deepSanitize(value);
+    return JSON.stringify(sani);
+  } catch {
+    return fallback;
+  }
+}
+
+function makeSingleUpsert(cols) {
+  const insertCols = cols.join(', ');
+  const ph = cols.map((_, i) => `$${i + 1}`).join(', ');
+  const updates = cols
+    .filter((c) => c !== 'id' && c !== 'created_at')
+    .map((c) => `${c}=EXCLUDED.${c}`)
+    .join(', ');
+
+  return `
+    INSERT INTO internal_messages (${insertCols})
+    VALUES (${ph})
+    ON CONFLICT (id) DO UPDATE SET
+      ${updates}
+  `;
 }

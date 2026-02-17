@@ -9,7 +9,7 @@ const cliProgress = require('cli-progress');
 module.exports = async function migrateCampaigns(ctx = {}) {
   console.log('📢 Migrando "Campaigns" → "campaigns"...');
 
-  // Tamanho do lote (ajuste via .env BATCH_SIZE). 1000 ≈ 12k params < 65535
+  // Tamanho do lote (ajuste via .env BATCH_SIZE). 1000 ≈ 15k params < 65535
   const BATCH_SIZE = Number(process.env.BATCH_SIZE || 1000);
 
   // Usa TENANT_ID do ctx (preferencial) ou do .env
@@ -141,9 +141,12 @@ module.exports = async function migrateCampaigns(ctx = {}) {
         const v = [
           row.id,                               // id
           safeName(row.name, row.id),           // name
-          row.start || null,                    // start_at
+          row.start || row.createdAt || new Date(), // start_at
           normStatus,                           // status
-          toInt(row.delay, 0),                  // delay_seconds
+          'fixed',                              // delay_type
+          normalizeDelaySeconds(row.delay),     // delay_seconds
+          null,                                 // min_delay_seconds
+          null,                                 // max_delay_seconds
           JSON.stringify(messages),             // messages (jsonb)
           row.mediaUrl || null,                 // media_path
           null,                                 // template_id (origem não tem)
@@ -154,17 +157,17 @@ module.exports = async function migrateCampaigns(ctx = {}) {
         ];
         perRowParams.push(v);
 
-        // 12 colunas por linha ⇒ placeholders
-        const base = i * 12;
+        // 15 colunas por linha ⇒ placeholders
+        const base = i * 15;
         placeholders.push(
-          `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}::jsonb, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11}, $${base + 12})`
+          `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}::jsonb, $${base + 9}, $${base + 10}, $${base + 11}, $${base + 12}, $${base + 13}, $${base + 14}, $${base + 15})`
         );
         values.push(...v);
       });
 
       const upsertSql = `
         INSERT INTO campaigns (
-          id, name, start_at, status, delay_seconds,
+          id, name, start_at, status, delay_type, delay_seconds, min_delay_seconds, max_delay_seconds,
           messages, media_path, template_id,
           company_id, channel_id, created_at, updated_at
         ) VALUES
@@ -173,9 +176,13 @@ module.exports = async function migrateCampaigns(ctx = {}) {
           name          = EXCLUDED.name,
           start_at      = EXCLUDED.start_at,
           status        = EXCLUDED.status,
+          delay_type    = EXCLUDED.delay_type,
           delay_seconds = EXCLUDED.delay_seconds,
+          min_delay_seconds = EXCLUDED.min_delay_seconds,
+          max_delay_seconds = EXCLUDED.max_delay_seconds,
           messages      = EXCLUDED.messages,
           media_path    = EXCLUDED.media_path,
+          template_id   = EXCLUDED.template_id,
           company_id    = EXCLUDED.company_id,
           channel_id    = EXCLUDED.channel_id,
           updated_at    = EXCLUDED.updated_at
@@ -199,21 +206,25 @@ module.exports = async function migrateCampaigns(ctx = {}) {
             await dest.query(
               `
               INSERT INTO campaigns (
-                id, name, start_at, status, delay_seconds,
+                id, name, start_at, status, delay_type, delay_seconds, min_delay_seconds, max_delay_seconds,
                 messages, media_path, template_id,
                 company_id, channel_id, created_at, updated_at
               ) VALUES (
-                $1, $2, $3, $4, $5,
-                $6::jsonb, $7, $8,
-                $9, $10, $11, $12
+                $1, $2, $3, $4, $5, $6, $7, $8,
+                $9::jsonb, $10, $11,
+                $12, $13, $14, $15
               )
               ON CONFLICT (id) DO UPDATE SET
                 name          = EXCLUDED.name,
                 start_at      = EXCLUDED.start_at,
                 status        = EXCLUDED.status,
+                delay_type    = EXCLUDED.delay_type,
                 delay_seconds = EXCLUDED.delay_seconds,
+                min_delay_seconds = EXCLUDED.min_delay_seconds,
+                max_delay_seconds = EXCLUDED.max_delay_seconds,
                 messages      = EXCLUDED.messages,
                 media_path    = EXCLUDED.media_path,
+                template_id   = EXCLUDED.template_id,
                 company_id    = EXCLUDED.company_id,
                 channel_id    = EXCLUDED.channel_id,
                 updated_at    = EXCLUDED.updated_at
@@ -272,6 +283,10 @@ function normalizeStatus(s) {
 function toInt(v, def = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? Math.trunc(n) : def;
+}
+function normalizeDelaySeconds(v) {
+  const n = toInt(v, 0);
+  return n > 0 ? n : null;
 }
 
 function safeName(name, id) {

@@ -88,7 +88,7 @@ module.exports = async function migrateQuickMessages(ctx = {}) {
       INSERT INTO public.quick_messages (
         id, name, messages, company_id, created_at, updated_at
       ) VALUES (
-        $1, $2, $3::jsonb, $4, $5, $6
+        $1, $2, $3::json, $4, $5, $6
       )
       ON CONFLICT (id) DO UPDATE SET
         name       = EXCLUDED.name,
@@ -130,7 +130,7 @@ module.exports = async function migrateQuickMessages(ctx = {}) {
         perRowParams.push(v);
 
         const base = i * 6;
-        placeholders.push(`($${base+1}, $${base+2}, $${base+3}::jsonb, $${base+4}, $${base+5}, $${base+6})`);
+        placeholders.push(`($${base+1}, $${base+2}, $${base+3}::json, $${base+4}, $${base+5}, $${base+6})`);
         values.push(...v);
       });
 
@@ -292,9 +292,11 @@ async function addGroupToAllUsers(dest, tenantId, groupId) {
   const sql = `
     UPDATE public.users
     SET quick_message_groups = CASE
-      WHEN quick_message_groups IS NULL THEN ARRAY[$1]::integer[]
-      WHEN $1 = ANY(quick_message_groups) THEN quick_message_groups
-      ELSE array_append(quick_message_groups, $1)
+      WHEN quick_message_groups IS NULL OR jsonb_typeof(quick_message_groups) <> 'array'
+        THEN jsonb_build_array($1::int)
+      WHEN quick_message_groups @> jsonb_build_array($1::int)
+        THEN quick_message_groups
+      ELSE quick_message_groups || jsonb_build_array($1::int)
     END,
     updated_at = NOW()
     ${tenantId ? 'WHERE company_id = $2' : ''}

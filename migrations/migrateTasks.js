@@ -182,9 +182,9 @@ module.exports = async function migrateTasks(ctx = {}) {
           row.description || '',                // 6  description
           task_type_id,                         // 7  task_type_id
           row.createdAt,                        // 8  created_at
-          row.due_date || null,                 // 9  due_date
-          toInt(row.priority, null),            // 10 priority
-          row.status || null,                   // 11 status
+          row.due_date || row.createdAt || new Date(), // 9  due_date
+          normalizePriority(row.priority),      // 10 priority
+          row.status || 'pendente',             // 11 status
           JSON.stringify(extraInfo),            // 12 extra_info::jsonb
           row.updatedAt                         // 13 updated_at
         ];
@@ -277,6 +277,31 @@ function safeName(name, id) {
 function toInt(v, def = null) {
   const n = Number(v);
   return Number.isFinite(n) ? Math.trunc(n) : def;
+}
+function normalizePriority(v) {
+  if (v == null) return 'nenhuma';
+  const raw = String(v).trim().toLowerCase();
+  const byWord = {
+    none: 'nenhuma',
+    nenhuma: 'nenhuma',
+    low: 'baixa',
+    baixa: 'baixa',
+    medium: 'media',
+    media: 'media',
+    alta: 'alta',
+    high: 'alta',
+    urgent: 'urgente',
+    urgente: 'urgente'
+  };
+  if (byWord[raw]) return byWord[raw];
+
+  const n = toInt(v, null);
+  if (n == null) return 'nenhuma';
+  if (n <= 0) return 'nenhuma';
+  if (n === 1) return 'baixa';
+  if (n === 2) return 'media';
+  if (n === 3) return 'alta';
+  return 'urgente';
 }
 function readBool(v, def = false) {
   if (v == null) return def;

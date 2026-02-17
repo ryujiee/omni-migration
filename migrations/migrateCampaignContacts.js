@@ -68,6 +68,10 @@ module.exports = async function migrateCampaignContacts(ctx = {}) {
         cc."contactId"  AS contact_id,
         cc.ack,
         cc."timestamp",
+        c.message1,
+        c.message2,
+        c.message3,
+        c."mediaUrl" AS sent_media_path,
         cc."createdAt",
         cc."updatedAt"
       FROM "public"."CampaignContacts" cc
@@ -119,33 +123,52 @@ module.exports = async function migrateCampaignContacts(ctx = {}) {
           respondedAt = new Date(Number(row.timestamp) * 1000); // origem em segundos
         }
 
-        // 8 colunas por linha ↓
-        const base = i * 8;
+        const sentPreview =
+          [row.message1, row.message2, row.message3]
+            .find(v => typeof v === 'string' && v.trim().length > 0) || null;
+        const sentAt = status === 'pending' ? null : row.createdAt || null;
+        const errorMsg = status === 'error' ? 'Falha no envio migrada da plataforma antiga (ack=-1).' : null;
+
+        // 13 colunas por linha ↓
+        const base = i * 13;
         placeholders.push(
-          `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8})`
+          `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11}, $${base + 12}, $${base + 13})`
         );
 
         values.push(
-          row.id,              // $1
-          row.campaign_id,     // $2
-          row.contact_id,      // $3
-          status,              // $4
-          responded,           // $5
-          respondedAt,         // $6
-          row.createdAt,       // $7
-          row.updatedAt        // $8
+          row.id,              // $1  id
+          row.campaign_id,     // $2  campaign_id
+          row.contact_id,      // $3  contact_id
+          status,              // $4  status
+          errorMsg,            // $5  error_msg
+          responded,           // $6  responded
+          respondedAt,         // $7  responded_at
+          null,                // $8  expired_at
+          sentAt,              // $9  sent_at
+          sentPreview,         // $10 sent_preview
+          row.sent_media_path || null, // $11 sent_media_path
+          row.createdAt,       // $12 created_at
+          row.updatedAt        // $13 updated_at
         );
       });
 
       const upsertSql = `
         INSERT INTO campaign_contacts (
-          id, campaign_id, contact_id, status, responded, responded_at, created_at, updated_at
+          id, campaign_id, contact_id, status, error_msg, responded, responded_at, expired_at,
+          sent_at, sent_preview, sent_media_path, created_at, updated_at
         ) VALUES
           ${placeholders.join(',')}
         ON CONFLICT (id) DO UPDATE SET
+          campaign_id  = EXCLUDED.campaign_id,
+          contact_id   = EXCLUDED.contact_id,
           status       = EXCLUDED.status,
+          error_msg    = EXCLUDED.error_msg,
           responded    = EXCLUDED.responded,
           responded_at = EXCLUDED.responded_at,
+          expired_at   = EXCLUDED.expired_at,
+          sent_at      = EXCLUDED.sent_at,
+          sent_preview = EXCLUDED.sent_preview,
+          sent_media_path = EXCLUDED.sent_media_path,
           updated_at   = EXCLUDED.updated_at
       `;
 

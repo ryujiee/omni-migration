@@ -9,8 +9,8 @@ const cliProgress = require('cli-progress');
 module.exports = async function migrateDepartments(ctx = {}) {
   console.log('🏢 Migrando "Queues" → "departments"...');
 
-  // 10 params/linha (transfer_type é literal) → 3000 linhas ≈ 30k params < 65535
-  const BATCH_SIZE = Number(process.env.BATCH_SIZE || 3000);
+  // 24 params/linha (transfer_type é literal) → 2000 linhas ≈ 48k params < 65535
+  const BATCH_SIZE = Number(process.env.BATCH_SIZE || 2000);
 
   // Usa TENANT_ID do ctx (preferencial) ou do .env
   const tenantId =
@@ -106,39 +106,72 @@ module.exports = async function migrateDepartments(ctx = {}) {
           safeName(row.name, row.id),            // 2  name
           toBool(row.status, true),              // 3  status (boolean)
           row.company_id,                        // 4  company_id
-          toBool(row.inactivity_active, false),  // 5  inactivity_active
-          toNonNegInt(row.inactivity_seconds),   // 6  inactivity_seconds
-          row.inactivity_action || null,         // 7  inactivity_action
-          row.inactivity_target_id || null,      // 8  inactivity_target_id
-          row.createdAt,                         // 9  created_at
-          row.updatedAt                          // 10 updated_at
+          '',                                    // 5  color
+          toBool(row.inactivity_active, false),  // 6  inactivity_active
+          toNonNegInt(row.inactivity_seconds),   // 7  inactivity_seconds
+          row.inactivity_action || '',           // 8  inactivity_action
+          row.inactivity_target_id || null,      // 9  inactivity_target_id
+          false,                                 // 10 open_inactivity_active
+          0,                                     // 11 open_inactivity_seconds
+          '',                                    // 12 open_inactivity_action
+          null,                                  // 13 open_inactivity_target_id
+          false,                                 // 14 email_on_close_enabled
+          false,                                 // 15 rating_enabled
+          null,                                  // 16 rating_flow_id
+          '',                                    // 17 rating_timeout_message
+          0,                                     // 18 rating_timeout_seconds
+          '',                                    // 19 ai_context
+          '',                                    // 20 ai_for_who
+          '',                                    // 21 ai_how
+          '[]',                                  // 22 ai_keywords
+          row.createdAt,                         // 23 created_at
+          row.updatedAt                          // 24 updated_at
         ];
         perRowParams.push(v);
 
-        const base = i * 10;
+        const base = i * 24;
         // transfer_type é literal 'queue' (coluna 5)
         placeholders.push(
-          `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, 'queue', $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10})`
+          `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, 'queue', $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11}, $${base + 12}, $${base + 13}, $${base + 14}, $${base + 15}, $${base + 16}, $${base + 17}, $${base + 18}, $${base + 19}, $${base + 20}, $${base + 21}, $${base + 22}::jsonb, $${base + 23}, $${base + 24})`
         );
         values.push(...v);
       });
 
       const upsertSql = `
         INSERT INTO departments (
-          id, name, status, company_id, transfer_type,
+          id, name, status, company_id, color, transfer_type,
           inactivity_active, inactivity_seconds, inactivity_action,
-          inactivity_target_id, created_at, updated_at
+          inactivity_target_id,
+          open_inactivity_active, open_inactivity_seconds, open_inactivity_action, open_inactivity_target_id,
+          email_on_close_enabled,
+          rating_enabled, rating_flow_id, rating_timeout_message, rating_timeout_seconds,
+          ai_context, ai_for_who, ai_how, ai_keywords,
+          created_at, updated_at
         ) VALUES
           ${placeholders.join(',')}
         ON CONFLICT (id) DO UPDATE SET
           name                = EXCLUDED.name,
           status              = EXCLUDED.status,
           company_id          = EXCLUDED.company_id,
+          color               = EXCLUDED.color,
           transfer_type       = EXCLUDED.transfer_type,
           inactivity_active   = EXCLUDED.inactivity_active,
           inactivity_seconds  = EXCLUDED.inactivity_seconds,
           inactivity_action   = EXCLUDED.inactivity_action,
           inactivity_target_id= EXCLUDED.inactivity_target_id,
+          open_inactivity_active = EXCLUDED.open_inactivity_active,
+          open_inactivity_seconds = EXCLUDED.open_inactivity_seconds,
+          open_inactivity_action = EXCLUDED.open_inactivity_action,
+          open_inactivity_target_id = EXCLUDED.open_inactivity_target_id,
+          email_on_close_enabled = EXCLUDED.email_on_close_enabled,
+          rating_enabled      = EXCLUDED.rating_enabled,
+          rating_flow_id      = EXCLUDED.rating_flow_id,
+          rating_timeout_message = EXCLUDED.rating_timeout_message,
+          rating_timeout_seconds = EXCLUDED.rating_timeout_seconds,
+          ai_context          = EXCLUDED.ai_context,
+          ai_for_who          = EXCLUDED.ai_for_who,
+          ai_how              = EXCLUDED.ai_how,
+          ai_keywords         = EXCLUDED.ai_keywords,
           updated_at          = EXCLUDED.updated_at
       `;
 
@@ -158,23 +191,45 @@ module.exports = async function migrateDepartments(ctx = {}) {
             await dest.query(
               `
               INSERT INTO departments (
-                id, name, status, company_id, transfer_type,
+                id, name, status, company_id, color, transfer_type,
                 inactivity_active, inactivity_seconds, inactivity_action,
-                inactivity_target_id, created_at, updated_at
+                inactivity_target_id,
+                open_inactivity_active, open_inactivity_seconds, open_inactivity_action, open_inactivity_target_id,
+                email_on_close_enabled,
+                rating_enabled, rating_flow_id, rating_timeout_message, rating_timeout_seconds,
+                ai_context, ai_for_who, ai_how, ai_keywords,
+                created_at, updated_at
               ) VALUES (
-                $1, $2, $3, $4, 'queue',
-                $5, $6, $7,
-                $8, $9, $10
+                $1, $2, $3, $4, $5, 'queue',
+                $6, $7, $8,
+                $9, $10, $11, $12, $13,
+                $14, $15, $16, $17, $18,
+                $19, $20, $21, $22::jsonb,
+                $23, $24
               )
               ON CONFLICT (id) DO UPDATE SET
                 name                = EXCLUDED.name,
                 status              = EXCLUDED.status,
                 company_id          = EXCLUDED.company_id,
+                color               = EXCLUDED.color,
                 transfer_type       = EXCLUDED.transfer_type,
                 inactivity_active   = EXCLUDED.inactivity_active,
                 inactivity_seconds  = EXCLUDED.inactivity_seconds,
                 inactivity_action   = EXCLUDED.inactivity_action,
                 inactivity_target_id= EXCLUDED.inactivity_target_id,
+                open_inactivity_active = EXCLUDED.open_inactivity_active,
+                open_inactivity_seconds = EXCLUDED.open_inactivity_seconds,
+                open_inactivity_action = EXCLUDED.open_inactivity_action,
+                open_inactivity_target_id = EXCLUDED.open_inactivity_target_id,
+                email_on_close_enabled = EXCLUDED.email_on_close_enabled,
+                rating_enabled      = EXCLUDED.rating_enabled,
+                rating_flow_id      = EXCLUDED.rating_flow_id,
+                rating_timeout_message = EXCLUDED.rating_timeout_message,
+                rating_timeout_seconds = EXCLUDED.rating_timeout_seconds,
+                ai_context          = EXCLUDED.ai_context,
+                ai_for_who          = EXCLUDED.ai_for_who,
+                ai_how              = EXCLUDED.ai_how,
+                ai_keywords         = EXCLUDED.ai_keywords,
                 updated_at          = EXCLUDED.updated_at
               `,
               v

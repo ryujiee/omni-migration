@@ -73,51 +73,34 @@ module.exports = async function migrateContacts(ctx = {}) {
       channelsByContact.rows.map(r => [r.contactId, r.channel_ids || []])
     );
 
-    // --- 3) Pré-carrega informações de TAGS no DESTINO por company_id
-    const companyIds = [...new Set(contacts.rows.map(r => r.tenantId).filter(v => v != null))];
-    // 👉 Se company_id for BIGINT, troque ::int[] por ::bigint[]
-    const tagInfoRes = await dest.query(
-      `SELECT id, name, color, company_id
-       FROM tags
-       ${companyIds.length ? 'WHERE company_id = ANY($1::int[])' : ''}`,
-      companyIds.length ? [companyIds] : []
-    );
-    // Map<company_id, Map<tag_id, {name,color}>>
-    const tagInfoByCompany = new Map();
-    for (const t of tagInfoRes.rows) {
-      const cid = String(t.company_id);
-      if (!tagInfoByCompany.has(cid)) tagInfoByCompany.set(cid, new Map());
-      tagInfoByCompany.get(cid).set(Number(t.id), { name: t.name, color: t.color });
-    }
-
-    // --- 4) UPSERT preparado
+    // --- 3) UPSERT preparado
     const upsertSql = `
       INSERT INTO contacts (
         id, name, phone_number, j_id, telephone_number, whatsapp,
-        instagram, telegram, messenger, email, profile_pic_url, push_name,
+        instagram, instagram_id, telegram, messenger, email, profile_pic_url, push_name,
         is_wa_contact, is_group, type, cpf, cnpj, birth_date,
-        address, annotations, company_id, created_at, updated_at,
+        address, annotations, channel_id, company_id, created_at, updated_at,
         tags, channel_assignments
       )
       VALUES (
         $1, $2, $3, $4, NULL, $5,
-        $6, $7, $8, $9, $10, $11,
-        $12, $13, $14, $15, $16, $17,
-        $18, $19, $20, $21, $22,
-        $23::jsonb, $24::jsonb
+        $6, $7, $8, $9, $10, $11, $12,
+        $13, $14, $15, $16, $17, $18,
+        $19, $20, $21, $22, $23,
+        $24::jsonb, $25::jsonb
       )
       ON CONFLICT (id) DO UPDATE SET
         name=EXCLUDED.name, phone_number=EXCLUDED.phone_number, j_id=EXCLUDED.j_id,
-        whatsapp=EXCLUDED.whatsapp, instagram=EXCLUDED.instagram, telegram=EXCLUDED.telegram,
+        whatsapp=EXCLUDED.whatsapp, instagram=EXCLUDED.instagram, instagram_id=EXCLUDED.instagram_id, telegram=EXCLUDED.telegram,
         messenger=EXCLUDED.messenger, email=EXCLUDED.email, profile_pic_url=EXCLUDED.profile_pic_url,
         push_name=EXCLUDED.push_name, is_wa_contact=EXCLUDED.is_wa_contact, is_group=EXCLUDED.is_group,
         type=EXCLUDED.type, cpf=EXCLUDED.cpf, cnpj=EXCLUDED.cnpj, birth_date=EXCLUDED.birth_date,
-        address=EXCLUDED.address, annotations=EXCLUDED.annotations, company_id=EXCLUDED.company_id,
+        address=EXCLUDED.address, annotations=EXCLUDED.annotations, channel_id=EXCLUDED.channel_id, company_id=EXCLUDED.company_id,
         tags=EXCLUDED.tags, channel_assignments=EXCLUDED.channel_assignments, updated_at=EXCLUDED.updated_at
     `;
     const upsertNamed = { name: 'upsert_contact', text: upsertSql };
 
-    // --- 5) Transação + desempenho
+    // --- 4) Transação + desempenho
     await dest.query('BEGIN');
     await dest.query('SET LOCAL synchronous_commit TO OFF');
 
@@ -144,22 +127,14 @@ module.exports = async function migrateContacts(ctx = {}) {
       const channelIds = Array.isArray(channelsMap[contactId]) ? channelsMap[contactId] : [];
       const channelAssignments = {};
       for (const chId of channelIds) channelAssignments[chId] = { assigned: true };
+      const primaryChannelId = channelIds.length ? Number(channelIds[0]) : null;
 
-      // --- TAGS no formato NOVO [{id,name,color,auto_assign}]
-      const compKey = String(row.tenantId);
-      const infoMap = tagInfoByCompany.get(compKey) || new Map();
+      // --- TAGS no formato da plataforma nova [{tag, auto_assign}]
       const tagsOld = Array.isArray(tagsIdMap[contactId]) ? tagsIdMap[contactId] : [];
-
-      const tags = tagsOld.map((tagIdNum) => {
-        const tagId = Number(tagIdNum);
-        const info = infoMap.get(tagId);
-        return {
-          id: tagId,
-          name: info?.name ?? `Tag ${tagId}`,
-          color: info?.color ?? '#999999',
-          auto_assign: false
-        };
-      });
+      const tags = tagsOld
+        .map(tagIdNum => Number(tagIdNum))
+        .filter(Number.isInteger)
+        .map(tagId => ({ tag: tagId, auto_assign: false }));
 
       await dest.query({
         ...upsertNamed,
@@ -169,6 +144,7 @@ module.exports = async function migrateContacts(ctx = {}) {
           phoneNumber,
           jId,
           whatsapp,
+          row.instagramPK?.toString() ?? null,
           row.instagramPK?.toString() ?? null,
           row.telegramId?.toString() ?? null,
           row.messengerId || null,
@@ -183,6 +159,7 @@ module.exports = async function migrateContacts(ctx = {}) {
           row.dataNascimento || null, // se quiser, troque por parseDate seguro
           address || '',
           '',
+          primaryChannelId,
           row.tenantId,
           row.createdAt,
           row.updatedAt,

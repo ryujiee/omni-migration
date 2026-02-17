@@ -16,7 +16,8 @@ const DefaultPermissions = {
     openTicket: true,
     filterSeeAll: true,
     manage: true,
-    viewTicketContact: true
+    viewTicketContact: true,
+    blockContact: true
   },
 
   InternalChat: { access: true },
@@ -26,13 +27,13 @@ const DefaultPermissions = {
   Permissions: { access: true, edit: true, create: true },
   Channels: { access: true, edit: true, create: true },
 
-  Tags: { access: true, edit: true, create: true, delete: true },
+  Tags: { access: true, edit: true, create: true, delete: true, seeAll: true },
 
   TicketReasons: { access: true, edit: true, create: true, delete: true },
 
   Providers: { access: true, edit: true, create: true, delete: true },
 
-  Contacts: { access: true, edit: true, create: true, delete: true },
+  Contacts: { access: true, edit: true, create: true, delete: true, blockContact: true },
 
   QuickMessages: { access: true, edit: true, create: true, delete: true },
 
@@ -52,6 +53,7 @@ const DefaultPermissions = {
 
   ReportsMessage: { access: true },
   ReportsTicket: { access: true },
+  ReportsTicketHistorical: { access: true },
   ReportsRating: { access: true },
   ReportsContact: { access: true },
 
@@ -62,7 +64,31 @@ const DefaultPermissions = {
   TicketsPanel: { access: true },
 
   Kanban: { access: true, edit: true, create: true, delete: true },
-  KanbanBoard: { access: true, edit: true, create: true, delete: true }
+  KanbanBoard: { access: true, edit: true, create: true, delete: true },
+
+  VirtualAgents: { access: true, edit: true, create: true, delete: true },
+  CompanyAIContext: { access: true, edit: true },
+  Cloudflare: { access: false, create: false },
+
+  SupportTickets: { access: true, edit: true, create: true },
+  SupportTicketCategories: { access: true, edit: true, create: true, delete: true },
+  MySupportTickets: { access: true, edit: true, create: true, delete: true },
+  SupportTicketReports: { access: true, edit: true, create: true, delete: true },
+  SupportTicketSettings: { access: true, edit: true, create: true, delete: true },
+  SupportUsers: { access: false, list: false, create: false, edit: false, delete: false },
+
+  SGP: { access: true, create: true, edit: true, delete: true },
+  IXC: { access: true, create: true, edit: true, delete: true },
+
+  WhatsappGroups: {
+    access: true,
+    create: true,
+    edit: true,
+    delete: true,
+    manageSettings: true,
+    manageParticipants: true,
+    leaveGroup: true
+  }
 };
 
 module.exports = async function migratePermissions(ctx = {}) {
@@ -312,28 +338,69 @@ function convertPermissions(oldPerms) {
 function mapModulo(modAntigo) {
   const mapa = {
     Dashboard: 'Dashboard',
+    Tickets: 'Tickets',
     Atendimentos: 'Tickets',
     'Chat Interno': 'InternalChat',
+    InternalChat: 'InternalChat',
+    Users: 'Users',
     Usuários: 'Users',
+    Departments: 'Departments',
     'Filas | Grupos': 'Departments',
+    Permissions: 'Permissions',
     'Permissões do sistema': 'Permissions',
+    Channels: 'Channels',
     Canais: 'Channels',
+    Tags: 'Tags',
     Etiquetas: 'Tags',
+    TicketReasons: 'TicketReasons',
     Telefonia: 'Providers',
+    Providers: 'Providers',
+    Contacts: 'Contacts',
     Contatos: 'Contacts',
+    QuickMessages: 'QuickMessages',
     'Mensagens Rápidas': 'QuickMessages',
+    Flows: 'Flows',
     Chatbot: 'Flows',
+    Settings: 'Settings',
     Configurações: 'Settings',
+    Campaign: 'Campaign',
     Campanha: 'Campaign',
+    Task: 'Task',
     Tarefas: 'Task',
+    TaskType: 'TaskType',
     'Tipos de Tarefa': 'TaskType',
+    MyTask: 'MyTask',
     'Minhas Tarefas': 'MyTask',
+    TaskAutomation: 'TaskAutomation',
     Automação: 'TaskAutomation',
+    AttendancePeriods: 'AttendancePeriods',
     'Horário de Atendimento': 'AttendancePeriods',
+    Holidays: 'Holidays',
     Feriados: 'Holidays',
+    ReportsMessage: 'ReportsMessage',
     'Relatórios de Mensagem': 'ReportsMessage',
+    ReportsTicket: 'ReportsTicket',
     'Relatórios de Atendimento': 'ReportsTicket',
+    ReportsTicketHistorical: 'ReportsTicketHistorical',
+    ReportsContact: 'ReportsContact',
     'Relatórios de Contatos': 'ReportsContact',
+    ReportsRating: 'ReportsRating',
+    ApiDocs: 'ApiDocs',
+    Timeline: 'Timeline',
+    TicketsPanel: 'TicketsPanel',
+    KanbanBoard: 'KanbanBoard',
+    VirtualAgents: 'VirtualAgents',
+    CompanyAIContext: 'CompanyAIContext',
+    Cloudflare: 'Cloudflare',
+    SupportTickets: 'SupportTickets',
+    SupportTicketCategories: 'SupportTicketCategories',
+    MySupportTickets: 'MySupportTickets',
+    SupportTicketReports: 'SupportTicketReports',
+    SupportTicketSettings: 'SupportTicketSettings',
+    SupportUsers: 'SupportUsers',
+    SGP: 'SGP',
+    IXC: 'IXC',
+    WhatsappGroups: 'WhatsappGroups',
 
     // novos nomes prováveis no legado:
     'Motivos de Atendimento': 'TicketReasons',
@@ -341,6 +408,14 @@ function mapModulo(modAntigo) {
     'Documentação da API': 'ApiDocs',
     'Linha do Tempo': 'Timeline',
     'Painel de Atendimentos': 'TicketsPanel',
+    'IA da Empresa': 'CompanyAIContext',
+    'Usuários de Suporte': 'SupportUsers',
+    'Atendimentos de Suporte': 'SupportTickets',
+    'Categorias de Suporte': 'SupportTicketCategories',
+    'Relatórios de Suporte': 'SupportTicketReports',
+    'Configurações de Suporte': 'SupportTicketSettings',
+    'Meus Atendimentos de Suporte': 'MySupportTickets',
+    'Grupos de WhatsApp': 'WhatsappGroups',
     Kanban: 'Kanban',
     'Quadro Kanban': 'KanbanBoard',
     'Quadro': 'KanbanBoard'
@@ -356,21 +431,31 @@ function mapAcao(acaoAntiga, moduloNovo) {
     editar: 'edit',
     criar: 'create',
     deletar: 'delete',
+    excluir: 'delete',
     download: 'download',
     configurar: 'edit',
     gerenciar: 'manage',
     alterar: 'edit',
+    listar: 'list',
 
     verDados: 'geral',
     contatos: 'access',
 
     enviarMensagem: 'sendMessage',
     verTodos: 'filterSeeAll',   // (Tickets)
+    verTudo: 'filterSeeAll',
+    verTodosHistorico: 'access',
     abrir: 'openTicket',
     abrirAtendimento: 'openTicket',
 
-    timeline: 'access',         // às vezes vinha "timeline": true
-    espiar: 'viewTicketContact' // compat
+    timeline: 'access',
+    espiar: 'viewTicketContact',
+    verContatoTicket: 'viewTicketContact',
+    bloquearContato: 'blockContact',
+    verTodosTags: 'seeAll',
+    gerenciarConfiguracoes: 'manageSettings',
+    gerenciarParticipantes: 'manageParticipants',
+    sairGrupo: 'leaveGroup'
   };
 
   if (moduloNovo === 'Timeline') {

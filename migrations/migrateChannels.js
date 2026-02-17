@@ -195,6 +195,12 @@ module.exports = async function migrateChannels(ctx = {}) {
         const enableBotForGroups = !!row.is_open_ia;
         const openTicketForGroups = !!row.is_open_ia;
         const deletedAt = row.isDeleted ? (row.updatedAt || new Date()) : null;
+        const whatsappName = row.name || '';
+        const telegramToken = mappedType === 'Telegram' ? (row.tokenAPI || '') : '';
+        const active = !row.isDeleted;
+        const fetchMessages = true;
+        const allowAllUsers = true;
+        const allowedUserIds = '[]';
 
         const v = [
           row.id,                          // 1 id
@@ -210,16 +216,22 @@ module.exports = async function migrateChannels(ctx = {}) {
           departmentId,                    // 11 department_id
           enableBotForGroups,              // 12 enable_chatbot_for_groups
           openTicketForGroups,             // 13 open_ticket_for_groups
-          row.createdAt,                   // 14 created_at
-          row.updatedAt,                   // 15 updated_at
-          deletedAt,                       // 16 deleted_at
-          vaId                             // 17 virtual_agent_id (NOVO)
+          whatsappName,                    // 14 whatsapp_name
+          telegramToken,                   // 15 telegram_token
+          active,                          // 16 active
+          fetchMessages,                   // 17 fetch_messages
+          allowAllUsers,                   // 18 allow_all_users
+          allowedUserIds,                  // 19 allowed_user_ids
+          row.createdAt,                   // 20 created_at
+          row.updatedAt,                   // 21 updated_at
+          deletedAt,                       // 22 deleted_at
+          vaId                             // 23 virtual_agent_id (NOVO)
         ];
         perRowParams.push(v);
 
-        const base = i * 17;
+        const base = placeholders.length * 23;
         placeholders.push(
-          `($${base+1},$${base+2},$${base+3},$${base+4},$${base+5},$${base+6},$${base+7},$${base+8},$${base+9},$${base+10},$${base+11},$${base+12},$${base+13},$${base+14},$${base+15},$${base+16},$${base+17})`
+          `($${base+1},$${base+2},$${base+3},$${base+4},$${base+5},$${base+6},$${base+7},$${base+8},$${base+9},$${base+10},$${base+11},$${base+12},$${base+13},$${base+14},$${base+15},$${base+16},$${base+17},$${base+18},$${base+19}::jsonb,$${base+20},$${base+21},$${base+22},$${base+23})`
         );
         values.push(...v);
       }
@@ -235,6 +247,7 @@ module.exports = async function migrateChannels(ctx = {}) {
         INSERT INTO channel_instances (
           id, name, type, company_id, status, j_id, session, qr_code, config,
           flow_id, department_id, enable_chatbot_for_groups, open_ticket_for_groups,
+          whatsapp_name, telegram_token, active, fetch_messages, allow_all_users, allowed_user_ids,
           created_at, updated_at, deleted_at, virtual_agent_id
         ) VALUES
           ${placeholders.join(',')}
@@ -251,6 +264,12 @@ module.exports = async function migrateChannels(ctx = {}) {
           department_id = EXCLUDED.department_id,
           enable_chatbot_for_groups = EXCLUDED.enable_chatbot_for_groups,
           open_ticket_for_groups    = EXCLUDED.open_ticket_for_groups,
+          whatsapp_name  = EXCLUDED.whatsapp_name,
+          telegram_token = EXCLUDED.telegram_token,
+          active         = EXCLUDED.active,
+          fetch_messages = EXCLUDED.fetch_messages,
+          allow_all_users = EXCLUDED.allow_all_users,
+          allowed_user_ids = EXCLUDED.allowed_user_ids,
           virtual_agent_id          = EXCLUDED.virtual_agent_id, -- NOVO
           updated_at  = EXCLUDED.updated_at,
           deleted_at  = EXCLUDED.deleted_at
@@ -274,9 +293,10 @@ module.exports = async function migrateChannels(ctx = {}) {
               INSERT INTO channel_instances (
                 id, name, type, company_id, status, j_id, session, qr_code, config,
                 flow_id, department_id, enable_chatbot_for_groups, open_ticket_for_groups,
+                whatsapp_name, telegram_token, active, fetch_messages, allow_all_users, allowed_user_ids,
                 created_at, updated_at, deleted_at, virtual_agent_id
               ) VALUES (
-                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17
+                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19::jsonb,$20,$21,$22,$23
               )
               ON CONFLICT (id) DO UPDATE SET
                 name        = EXCLUDED.name,
@@ -291,6 +311,12 @@ module.exports = async function migrateChannels(ctx = {}) {
                 department_id = EXCLUDED.department_id,
                 enable_chatbot_for_groups = EXCLUDED.enable_chatbot_for_groups,
                 open_ticket_for_groups    = EXCLUDED.open_ticket_for_groups,
+                whatsapp_name  = EXCLUDED.whatsapp_name,
+                telegram_token = EXCLUDED.telegram_token,
+                active         = EXCLUDED.active,
+                fetch_messages = EXCLUDED.fetch_messages,
+                allow_all_users = EXCLUDED.allow_all_users,
+                allowed_user_ids = EXCLUDED.allowed_user_ids,
                 virtual_agent_id          = EXCLUDED.virtual_agent_id,
                 updated_at  = EXCLUDED.updated_at,
                 deleted_at  = EXCLUDED.deleted_at

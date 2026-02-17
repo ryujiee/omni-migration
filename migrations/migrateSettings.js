@@ -104,6 +104,9 @@ module.exports = async function migrateSettings(ctx = {}) {
           UPDATE settings
              SET message_signature = TRUE,
                  view_chatbot      = TRUE,
+                 allow_user_disable_message_signature = COALESCE(allow_user_disable_message_signature, TRUE),
+                 smtp = COALESCE(smtp, '{}'::jsonb),
+                 support_ticket_config = COALESCE(support_ticket_config, '{}'::jsonb),
                  updated_at        = NOW()
            WHERE company_id = ANY($1::int[])
           `,
@@ -113,8 +116,11 @@ module.exports = async function migrateSettings(ctx = {}) {
         // 3.2) INSERT apenas dos faltantes (anti-join via UNNEST)
         await dest.query(
           `
-          INSERT INTO settings (company_id, message_signature, view_chatbot, created_at, updated_at)
-          SELECT s.company_id, TRUE, TRUE, NOW(), NOW()
+          INSERT INTO settings (
+            company_id, message_signature, view_chatbot, allow_user_disable_message_signature,
+            smtp, support_ticket_config, created_at, updated_at
+          )
+          SELECT s.company_id, TRUE, TRUE, TRUE, '{}'::jsonb, '{}'::jsonb, NOW(), NOW()
           FROM UNNEST($1::int[]) AS s(company_id)
           LEFT JOIN settings t ON t.company_id = s.company_id
           WHERE t.company_id IS NULL

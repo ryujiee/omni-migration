@@ -81,14 +81,15 @@ module.exports = async function migrateTags(ctx = {}) {
     // 4) Upsert single (fallback)
     const upsertSqlSingle = `
       INSERT INTO tags (
-        id, name, color, active, company_id, created_at, updated_at
+        id, name, color, active, is_public, company_id, created_at, updated_at
       ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7
+        $1, $2, $3, $4, $5, $6, $7, $8
       )
       ON CONFLICT (id) DO UPDATE SET
         name       = EXCLUDED.name,
         color      = EXCLUDED.color,
         active     = EXCLUDED.active,
+        is_public  = EXCLUDED.is_public,
         company_id = EXCLUDED.company_id,
         updated_at = EXCLUDED.updated_at
     `;
@@ -119,15 +120,16 @@ module.exports = async function migrateTags(ctx = {}) {
           name,            // 2
           color,           // 3
           active,          // 4
-          row.company_id,  // 5
-          row.createdAt,   // 6
-          row.updatedAt    // 7
+          true,            // 5 is_public
+          row.company_id,  // 6
+          row.createdAt,   // 7
+          row.updatedAt    // 8
         ];
         perRowParams.push(v);
 
-        const base = i * 7;
+        const base = i * 8;
         placeholders.push(
-          `($${base+1}, $${base+2}, $${base+3}, $${base+4}, $${base+5}, $${base+6}, $${base+7})`
+          `($${base+1}, $${base+2}, $${base+3}, $${base+4}, $${base+5}, $${base+6}, $${base+7}, $${base+8})`
         );
         values.push(...v);
       });
@@ -139,13 +141,14 @@ module.exports = async function migrateTags(ctx = {}) {
         await dest.query(
           `
           INSERT INTO tags (
-            id, name, color, active, company_id, created_at, updated_at
+            id, name, color, active, is_public, company_id, created_at, updated_at
           ) VALUES
             ${placeholders.join(',')}
           ON CONFLICT (id) DO UPDATE SET
             name       = EXCLUDED.name,
             color      = EXCLUDED.color,
             active     = EXCLUDED.active,
+            is_public  = EXCLUDED.is_public,
             company_id = EXCLUDED.company_id,
             updated_at = EXCLUDED.updated_at
           `,

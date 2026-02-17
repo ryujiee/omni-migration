@@ -12,8 +12,8 @@ const { buildContext } = require('./utils/context');
 const steps = [
   { name: 'Tenants', func: require('./migrations/migrateTenants') },
   { name: 'Departments', func: require('./migrations/migrateDepartments') },
-  { name: 'Users', func: require('./migrations/migrateUsers') },
   { name: 'Permissions', func: require('./migrations/migratePermissions') },
+  { name: 'Users', func: require('./migrations/migrateUsers') },
   { name: 'TaskTypes', func: require('./migrations/migrateTaskTypes') },
   { name: 'Tasks', func: require('./migrations/migrateTasks') },
   { name: 'Tags', func: require('./migrations/migrateTags') },

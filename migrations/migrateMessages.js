@@ -443,6 +443,7 @@ function safeJsonb(value, fallback = '{}') {
 
 function buildPayload(row) {
   const oldId = get(row, 'id');
+  const ack = normalizeAck(get(row, 'status'));
   return {
     __old_id: String(oldId),
     __quoted_old: get(row, 'quotedMsgId'),
@@ -454,7 +455,8 @@ function buildPayload(row) {
     media_name: sanitizeUtf16(get(row, 'mediaUrl') || ''),
     message_id: sanitizeUtf16(get(row, 'messageId') || null),  // null se vazio
     data_json: parseJSON(get(row, 'dataJson'), {}),
-    ack: sanitizeUtf16(String(get(row, 'status') || 'sent')),
+    ack: sanitizeUtf16(ack),
+    message_status: buildMessageStatus(ack, get(row, 'updatedAt') || get(row, 'createdAt')),
     is_deleted: !!get(row, 'isDeleted'),
     from_me: !!get(row, 'fromMe'),
     user_id: get(row, 'userId') || null,
@@ -470,16 +472,16 @@ function buildInsertPlaceholders(payloads) {
   const values = [];
   for (let i = 0; i < payloads.length; i++) {
     const p = payloads[i];
-    const base = i * 15;
+    const base = i * 16;
     placeholders.push(
       `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, ` +
-      `$${base + 7}::jsonb, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11}, $${base + 12}, ` +
-      `$${base + 13}, $${base + 14}, $${base + 15})`
+      `$${base + 7}::jsonb, $${base + 8}, $${base + 9}::jsonb, $${base + 10}, $${base + 11}, $${base + 12}, $${base + 13}, ` +
+      `$${base + 14}, $${base + 15}, $${base + 16})`
     );
     values.push(
       p.ticket_id, p.body, p.edited_body, p.media_type, p.media_name, p.message_id,
       safeJsonb(p.data_json),              // JSON seguro
-      p.ack, p.is_deleted, p.from_me, p.user_id, p.contact_id,
+      p.ack, safeJsonb(p.message_status, 'null'), p.is_deleted, p.from_me, p.user_id, p.contact_id,
       p.schedule_date, p.created_at, p.updated_at
     );
   }
@@ -490,7 +492,7 @@ function makeInsertSQL(placeholders) {
   return `
     INSERT INTO messages (
       ticket_id, body, edited_body, media_type, media_name, message_id,
-      data_json, ack, is_deleted, from_me, user_id, contact_id,
+      data_json, ack, message_status, is_deleted, from_me, user_id, contact_id,
       schedule_date, created_at, updated_at
     ) VALUES
       ${placeholders.join(',')}
@@ -581,4 +583,28 @@ function parseReactions(raw, row, fallbackDate) {
 }
 function safeParseJSON(s, fallback) {
   try { return JSON.parse(s); } catch { return fallback; }
+}
+function normalizeAck(v) {
+  if (v == null) return 'sent';
+  const raw = String(v).trim().toLowerCase();
+  const n = Number(raw);
+  if (Number.isFinite(n)) {
+    if (n < 0) return 'failed';
+    if (n <= 1) return 'sent';
+    if (n === 2) return 'delivered';
+    return 'read';
+  }
+  if (['failed', 'error', 'erro'].includes(raw)) return 'failed';
+  if (['delivered', 'received'].includes(raw)) return 'delivered';
+  if (['read', 'seen', 'lida'].includes(raw)) return 'read';
+  return 'sent';
+}
+function buildMessageStatus(ack, at) {
+  if (!ack) return null;
+  const payload = {
+    type: ack === 'failed' ? 'error' : 'info',
+    status: ack
+  };
+  if (at) payload.at = at;
+  return payload;
 }

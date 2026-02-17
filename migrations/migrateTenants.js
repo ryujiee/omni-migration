@@ -9,7 +9,7 @@ const cliProgress = require('cli-progress');
 module.exports = async function migrateTenants(ctx = {}) {
   console.log('📦 Migrando "Tenants" → "companies"...');
 
-  // 18 params/linha → 2000 linhas ≈ 36k params (< 65535) — seguro
+  // 20 params/linha → 2000 linhas ≈ 40k params (< 65535) — seguro
   const BATCH_SIZE = Number(process.env.BATCH_SIZE || 2000);
   const INCLUDE_MASTER = readBool(process.env.TENANTS_INCLUDE_MASTER, false); // se true, permite id=1
 
@@ -90,12 +90,12 @@ module.exports = async function migrateTenants(ctx = {}) {
     const upsertSqlSingle = `
       INSERT INTO companies (
         id, name, cnpj, users_allowed, status, plan, address, price_per_user,
-        is_master, logo, theme, background, subdomain, omni_name, favicon,
-        resale_id, created_at, updated_at
+        discount, is_master, logo, theme, background, subdomain, omni_name, favicon,
+        modules, resale_id, created_at, updated_at
       ) VALUES (
         $1, $2, $3, $4, $5, $6::jsonb, $7, $8,
-        $9, $10, $11::jsonb, $12, $13, $14, $15,
-        $16, $17, $18
+        $9::jsonb, $10, $11, $12::jsonb, $13, $14, $15, $16,
+        $17::jsonb, $18, $19, $20
       )
       ON CONFLICT (id) DO UPDATE SET
         name = EXCLUDED.name,
@@ -105,6 +105,7 @@ module.exports = async function migrateTenants(ctx = {}) {
         plan = EXCLUDED.plan,
         address = EXCLUDED.address,
         price_per_user = EXCLUDED.price_per_user,
+        discount = EXCLUDED.discount,
         is_master = EXCLUDED.is_master,
         logo = EXCLUDED.logo,
         theme = EXCLUDED.theme,
@@ -112,6 +113,7 @@ module.exports = async function migrateTenants(ctx = {}) {
         subdomain = EXCLUDED.subdomain,
         omni_name = EXCLUDED.omni_name,
         favicon = EXCLUDED.favicon,
+        modules = EXCLUDED.modules,
         resale_id = EXCLUDED.resale_id,
         updated_at = EXCLUDED.updated_at
     `;
@@ -165,6 +167,8 @@ module.exports = async function migrateTenants(ctx = {}) {
 
         // defaults fixos
         const plan = defaultPlan();
+        const discount = defaultDiscount();
+        const modules = defaultModules();
         const theme = defaultTheme();
         const address = '';
         const pricePerUser = 0.0;
@@ -177,16 +181,16 @@ module.exports = async function migrateTenants(ctx = {}) {
 
         const v = [
           id, name, cnpj, row.users_allowed, status, JSON.stringify(plan), address, pricePerUser,
-          isMaster, logo, JSON.stringify(theme), background, subdomain, omniName, favicon,
-          resaleId, createdAt, updatedAt
+          JSON.stringify(discount), isMaster, logo, JSON.stringify(theme), background, subdomain, omniName, favicon,
+          JSON.stringify(modules), resaleId, createdAt, updatedAt
         ];
         perRowParams.push(v);
 
-        const base = i * 18;
+        const base = i * 20;
         placeholders.push(
           `($${base+1}, $${base+2}, $${base+3}, $${base+4}, $${base+5}, $${base+6}::jsonb, $${base+7}, $${base+8}, ` +
-          `$${base+9}, $${base+10}, $${base+11}::jsonb, $${base+12}, $${base+13}, $${base+14}, $${base+15}, ` +
-          `$${base+16}, $${base+17}, $${base+18})`
+          `$${base+9}::jsonb, $${base+10}, $${base+11}, $${base+12}::jsonb, $${base+13}, $${base+14}, $${base+15}, $${base+16}, ` +
+          `$${base+17}::jsonb, $${base+18}, $${base+19}, $${base+20})`
         );
         values.push(...v);
       });
@@ -199,8 +203,8 @@ module.exports = async function migrateTenants(ctx = {}) {
           `
           INSERT INTO companies (
             id, name, cnpj, users_allowed, status, plan, address, price_per_user,
-            is_master, logo, theme, background, subdomain, omni_name, favicon,
-            resale_id, created_at, updated_at
+            discount, is_master, logo, theme, background, subdomain, omni_name, favicon,
+            modules, resale_id, created_at, updated_at
           ) VALUES
             ${placeholders.join(',')}
           ON CONFLICT (id) DO UPDATE SET
@@ -211,6 +215,7 @@ module.exports = async function migrateTenants(ctx = {}) {
             plan = EXCLUDED.plan,
             address = EXCLUDED.address,
             price_per_user = EXCLUDED.price_per_user,
+            discount = EXCLUDED.discount,
             is_master = EXCLUDED.is_master,
             logo = EXCLUDED.logo,
             theme = EXCLUDED.theme,
@@ -218,6 +223,7 @@ module.exports = async function migrateTenants(ctx = {}) {
             subdomain = EXCLUDED.subdomain,
             omni_name = EXCLUDED.omni_name,
             favicon = EXCLUDED.favicon,
+            modules = EXCLUDED.modules,
             resale_id = EXCLUDED.resale_id,
             updated_at = EXCLUDED.updated_at
           `,
@@ -226,14 +232,7 @@ module.exports = async function migrateTenants(ctx = {}) {
         await dest.query('COMMIT');
 
         // consolida unicidade global após sucesso do lote
-        for (const s of batch.map(r => slugSubdomain(s.name, r.id))) {
-          // já consolidamos com subdomain final, mas manteremos set existenteSubdomains
-          // via batchSubs consolidado:
-        }
         for (const s of batchSubs) existingSubdomains.add(s);
-        for (const c of batch.map(r => normalizeCnpj(r.cnpj)).filter(Boolean)) {
-          // idem CNPJ normalizado original pode não ser o final; consolidamos os do lote:
-        }
         for (const c of Array.from(new Set(
           perRowParams.map(v => v[2]) // cnpj final usado no insert
         ))) {
@@ -254,7 +253,7 @@ module.exports = async function migrateTenants(ctx = {}) {
 
             // consolida unicidade global após sucesso individual
             existingCnpjs.add(v[2]);        // cnpj
-            existingSubdomains.add(v[12]);  // subdomain
+            existingSubdomains.add(v[13]);  // subdomain
           } catch (rowErr) {
             await dest.query('ROLLBACK');
             erros += 1;
@@ -289,17 +288,47 @@ function normalizeStatus(s) {
 }
 function defaultPlan() {
   return {
-    Webchat:           { price: 0, amount: 0, enabled: false },
-    Telegram:          { price: 0, amount: 0, enabled: false },
-    Instagram:         { price: 0, amount: 0, enabled: false },
-    Messenger:         { price: 0, amount: 0, enabled: false },
-    Telefonia:         { price: 0, amount: 0, enabled: true  },
-    WhatsAppQRCode:    { price: 0, amount: 0, enabled: false },
-    WhatsAppCloudAPI:  { price: 0, amount: 0, enabled: false }
+    Webchat:        { price: 0, amount: 999, enabled: false },
+    Telegram:       { price: 0, amount: 999, enabled: false },
+    Instagram:      { price: 0, amount: 999, enabled: false },
+    Messenger:      { price: 0, amount: 999, enabled: false },
+    Telefonia:      { price: 0, amount: 999, enabled: true  },
+    WhatsAppQRCode: { price: 0, amount: 999, enabled: false },
+    WhatsAppAPI:    { price: 0, amount: 999, enabled: false }
+  };
+}
+function defaultDiscount() {
+  return {
+    user: 0,
+    Telefonia: 0,
+    WhatsAppQRCode: 0,
+    Telegram: 0,
+    Instagram: 0,
+    WhatsAppAPI: 0,
+    Webchat: 0,
+    Messenger: 0
+  };
+}
+function defaultModules() {
+  return {
+    support_tickets: {
+      enabled: false,
+      price: 0
+    }
   };
 }
 function defaultTheme() {
-  return { primary: '#1976d2', secondary: '#42a5f5' };
+  return {
+    primary: '#1976d2',
+    secondary: '#42a5f5',
+    light: { primary: '#1976d2', secondary: '#42a5f5', logo: 'default.png', background: 'default.png', favicon: 'default.png' },
+    dark: { primary: '#1976d2', secondary: '#42a5f5', logo: 'default.png', background: 'default.png', favicon: 'default.png' },
+    useSamePrimaryColor: true,
+    useSameSecondaryColor: true,
+    useSameLogo: true,
+    useSameBackground: true,
+    useSameFavicon: true
+  };
 }
 
 function normalizeCnpj(v) {

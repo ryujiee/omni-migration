@@ -46,6 +46,9 @@ module.exports = async function migrateTickets(ctx = {}) {
       flowsByCompany.get(cid).add(f.id);
     }
 
+    const channelsRes = await dest.query('SELECT id, virtual_agent_id, flow_id FROM channel_instances');
+    const channelMeta = new Map(channelsRes.rows.map(r => [String(r.id), r]));
+
     const baseSelect = `
       SELECT
         "id",
@@ -85,12 +88,14 @@ module.exports = async function migrateTickets(ctx = {}) {
         id, status, last_message, channel_id, contact_id, user_id,
         department_id, flow_id,
         last_message_at, closed_at, is_group, participants, silenced,
+        tags, pinned, last_processed_message_id, virtual_agent_id,
         company_id, created_at, updated_at
       ) VALUES (
         $1, $2, $3, $4, $5, $6,
         $7, $8,
         $9, $10, $11, $12::jsonb, $13::jsonb,
-        $14, $15, $16
+        $14::jsonb, $15::jsonb, $16, $17,
+        $18, $19, $20
       )
       ON CONFLICT (id) DO UPDATE SET
         status          = EXCLUDED.status,
@@ -105,6 +110,10 @@ module.exports = async function migrateTickets(ctx = {}) {
         is_group        = EXCLUDED.is_group,
         participants    = EXCLUDED.participants,
         silenced        = EXCLUDED.silenced,
+        tags            = EXCLUDED.tags,
+        pinned          = EXCLUDED.pinned,
+        last_processed_message_id = EXCLUDED.last_processed_message_id,
+        virtual_agent_id = EXCLUDED.virtual_agent_id,
         company_id      = EXCLUDED.company_id,
         updated_at      = EXCLUDED.updated_at
     `;
@@ -117,12 +126,20 @@ module.exports = async function migrateTickets(ctx = {}) {
       const participants = normalizeJsonArray(row.participants);
       const silenced = normalizeJsonArray(row.silenced);
 
-      // valida flow_id (se não existir no destino, vira NULL)
+      const channel = channelMeta.get(String(row.channel_id || ''));
+
+      // valida flow_id (se não existir no destino, tenta fallback pelo canal)
       let flowId = row.flow_id || null;
       if (flowId != null) {
         const set = flowsByCompany.get(String(row.company_id));
         if (!set || !set.has(flowId)) flowId = null;
       }
+      if (flowId == null && channel?.flow_id != null) {
+        const set = flowsByCompany.get(String(row.company_id));
+        if (set && set.has(channel.flow_id)) flowId = channel.flow_id;
+      }
+
+      const virtualAgentId = channel?.virtual_agent_id || null;
 
       try {
         await dest.query(upsertSql, [
@@ -139,9 +156,13 @@ module.exports = async function migrateTickets(ctx = {}) {
           !!row.is_group,                           // $11
           JSON.stringify(participants),             // $12
           JSON.stringify(silenced),                 // $13
-          row.company_id,                           // $14
-          row.createdAt,                            // $15
-          row.updatedAt                             // $16
+          '[]',                                     // $14 tags
+          '[]',                                     // $15 pinned
+          '',                                       // $16 last_processed_message_id
+          virtualAgentId,                           // $17
+          row.company_id,                           // $18
+          row.createdAt,                            // $19
+          row.updatedAt                             // $20
         ]);
         migrated++;
       } catch (err) {

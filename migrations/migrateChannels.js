@@ -48,6 +48,44 @@ module.exports = async function migrateChannels(ctx = {}) {
     // map rápido de VirtualAgent por (company, flow)
     const vaCache = new Map(); // key: "company#flow" -> id
 
+    // Detecta schema real do destino para suportar versões com colunas diferentes
+    const channelColsRes = await dest.query(`
+      SELECT column_name, data_type
+      FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'channel_instances'
+    `);
+    const channelCols = new Set(channelColsRes.rows.map(r => r.column_name));
+    const channelTypes = new Map(channelColsRes.rows.map(r => [r.column_name, r.data_type]));
+
+    const jidColumn = channelCols.has('j_id') ? 'j_id' : (channelCols.has('jid') ? 'jid' : null);
+    const qrCodeColumn = channelCols.has('qr_code') ? 'qr_code' : (channelCols.has('qrcode') ? 'qrcode' : null);
+    if (!jidColumn || !qrCodeColumn) {
+      throw new Error('Tabela channel_instances sem colunas de identificação esperadas (j_id/jid, qr_code/qrcode).');
+    }
+
+    const candidateColumns = [
+      'id', 'name', 'type', 'company_id', 'status',
+      jidColumn, 'session', qrCodeColumn, 'config',
+      'flow_id', 'department_id', 'enable_chatbot_for_groups', 'open_ticket_for_groups',
+      'whatsapp_name', 'telegram_token', 'active', 'fetch_messages', 'allow_all_users', 'allowed_user_ids',
+      'created_at', 'updated_at', 'deleted_at', 'virtual_agent_id'
+    ];
+    const channelInsertColumns = candidateColumns.filter(col => channelCols.has(col));
+    const channelUpdatableColumns = channelInsertColumns.filter(col => col !== 'id' && col !== 'created_at');
+    const columnsSql = channelInsertColumns.join(', ');
+    const upsertSetSql = channelUpdatableColumns.length
+      ? channelUpdatableColumns.map(col => `${col} = EXCLUDED.${col}`).join(',\n          ')
+      : 'id = EXCLUDED.id';
+    const singleTupleSql = channelInsertColumns
+      .map((col, idx) => `$${idx + 1}${jsonColumnCast(col, channelTypes)}`)
+      .join(', ');
+    const upsertSqlSingle = `
+      INSERT INTO channel_instances (${columnsSql})
+      VALUES (${singleTupleSql})
+      ON CONFLICT (id) DO UPDATE SET
+          ${upsertSetSql}
+    `;
+
     const countRes = await source.query(
       `SELECT COUNT(*)::bigint AS total FROM "public"."Whatsapps" ${tenantId ? 'WHERE "tenantId" = $1' : ''}`,
       tenantId ? [tenantId] : []
@@ -202,36 +240,42 @@ module.exports = async function migrateChannels(ctx = {}) {
         const allowAllUsers = true;
         const allowedUserIds = '[]';
 
-        const v = [
-          row.id,                          // 1 id
-          safeName(row.name, row.id),      // 2 name
-          mappedType,                      // 3 type
-          row.company_id,                  // 4 company_id
-          status,                          // 5 status
-          jId,                             // 6 j_id
-          session,                         // 7 session (bytea -> null)
-          qrCode,                          // 8 qr_code
-          config,                          // 9 config (json)
-          flowId,                          // 10 flow_id (LEGACY)
-          departmentId,                    // 11 department_id
-          enableBotForGroups,              // 12 enable_chatbot_for_groups
-          openTicketForGroups,             // 13 open_ticket_for_groups
-          whatsappName,                    // 14 whatsapp_name
-          telegramToken,                   // 15 telegram_token
-          active,                          // 16 active
-          fetchMessages,                   // 17 fetch_messages
-          allowAllUsers,                   // 18 allow_all_users
-          allowedUserIds,                  // 19 allowed_user_ids
-          row.createdAt,                   // 20 created_at
-          row.updatedAt,                   // 21 updated_at
-          deletedAt,                       // 22 deleted_at
-          vaId                             // 23 virtual_agent_id (NOVO)
-        ];
+        const rowValuesByColumn = {
+          id: row.id,
+          name: safeName(row.name, row.id),
+          type: mappedType,
+          company_id: row.company_id,
+          status,
+          [jidColumn]: jId,
+          session,
+          [qrCodeColumn]: qrCode,
+          config,
+          flow_id: flowId,
+          department_id: departmentId,
+          enable_chatbot_for_groups: enableBotForGroups,
+          open_ticket_for_groups: openTicketForGroups,
+          whatsapp_name: whatsappName,
+          telegram_token: telegramToken,
+          active,
+          fetch_messages: fetchMessages,
+          allow_all_users: allowAllUsers,
+          allowed_user_ids: allowedUserIds,
+          created_at: row.createdAt,
+          updated_at: row.updatedAt,
+          deleted_at: deletedAt,
+          virtual_agent_id: vaId
+        };
+        const v = channelInsertColumns.map(col =>
+          Object.prototype.hasOwnProperty.call(rowValuesByColumn, col) ? rowValuesByColumn[col] : null
+        );
         perRowParams.push(v);
 
-        const base = placeholders.length * 23;
+        const base = placeholders.length * channelInsertColumns.length;
+        const tuple = channelInsertColumns
+          .map((col, idx) => `$${base + idx + 1}${jsonColumnCast(col, channelTypes)}`)
+          .join(',');
         placeholders.push(
-          `($${base+1},$${base+2},$${base+3},$${base+4},$${base+5},$${base+6},$${base+7},$${base+8},$${base+9},$${base+10},$${base+11},$${base+12},$${base+13},$${base+14},$${base+15},$${base+16},$${base+17},$${base+18},$${base+19}::jsonb,$${base+20},$${base+21},$${base+22},$${base+23})`
+          `(${tuple})`
         );
         values.push(...v);
       }
@@ -244,35 +288,11 @@ module.exports = async function migrateChannels(ctx = {}) {
       }
 
       const upsertSql = `
-        INSERT INTO channel_instances (
-          id, name, type, company_id, status, j_id, session, qr_code, config,
-          flow_id, department_id, enable_chatbot_for_groups, open_ticket_for_groups,
-          whatsapp_name, telegram_token, active, fetch_messages, allow_all_users, allowed_user_ids,
-          created_at, updated_at, deleted_at, virtual_agent_id
-        ) VALUES
+        INSERT INTO channel_instances (${columnsSql})
+        VALUES
           ${placeholders.join(',')}
         ON CONFLICT (id) DO UPDATE SET
-          name        = EXCLUDED.name,
-          type        = EXCLUDED.type,
-          company_id  = EXCLUDED.company_id,
-          status      = EXCLUDED.status,
-          j_id        = EXCLUDED.j_id,
-          session     = EXCLUDED.session,
-          qr_code     = EXCLUDED.qr_code,
-          config      = EXCLUDED.config,
-          flow_id     = EXCLUDED.flow_id,            -- legado (mantém)
-          department_id = EXCLUDED.department_id,
-          enable_chatbot_for_groups = EXCLUDED.enable_chatbot_for_groups,
-          open_ticket_for_groups    = EXCLUDED.open_ticket_for_groups,
-          whatsapp_name  = EXCLUDED.whatsapp_name,
-          telegram_token = EXCLUDED.telegram_token,
-          active         = EXCLUDED.active,
-          fetch_messages = EXCLUDED.fetch_messages,
-          allow_all_users = EXCLUDED.allow_all_users,
-          allowed_user_ids = EXCLUDED.allowed_user_ids,
-          virtual_agent_id          = EXCLUDED.virtual_agent_id, -- NOVO
-          updated_at  = EXCLUDED.updated_at,
-          deleted_at  = EXCLUDED.deleted_at
+          ${upsertSetSql}
       `;
 
       try {
@@ -288,41 +308,7 @@ module.exports = async function migrateChannels(ctx = {}) {
           try {
             await dest.query('BEGIN');
             await dest.query('SET LOCAL synchronous_commit TO OFF');
-            await dest.query(
-              `
-              INSERT INTO channel_instances (
-                id, name, type, company_id, status, j_id, session, qr_code, config,
-                flow_id, department_id, enable_chatbot_for_groups, open_ticket_for_groups,
-                whatsapp_name, telegram_token, active, fetch_messages, allow_all_users, allowed_user_ids,
-                created_at, updated_at, deleted_at, virtual_agent_id
-              ) VALUES (
-                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19::jsonb,$20,$21,$22,$23
-              )
-              ON CONFLICT (id) DO UPDATE SET
-                name        = EXCLUDED.name,
-                type        = EXCLUDED.type,
-                company_id  = EXCLUDED.company_id,
-                status      = EXCLUDED.status,
-                j_id        = EXCLUDED.j_id,
-                session     = EXCLUDED.session,
-                qr_code     = EXCLUDED.qr_code,
-                config      = EXCLUDED.config,
-                flow_id     = EXCLUDED.flow_id,
-                department_id = EXCLUDED.department_id,
-                enable_chatbot_for_groups = EXCLUDED.enable_chatbot_for_groups,
-                open_ticket_for_groups    = EXCLUDED.open_ticket_for_groups,
-                whatsapp_name  = EXCLUDED.whatsapp_name,
-                telegram_token = EXCLUDED.telegram_token,
-                active         = EXCLUDED.active,
-                fetch_messages = EXCLUDED.fetch_messages,
-                allow_all_users = EXCLUDED.allow_all_users,
-                allowed_user_ids = EXCLUDED.allowed_user_ids,
-                virtual_agent_id          = EXCLUDED.virtual_agent_id,
-                updated_at  = EXCLUDED.updated_at,
-                deleted_at  = EXCLUDED.deleted_at
-              `,
-              v
-            );
+            await dest.query(upsertSqlSingle, v);
             await dest.query('COMMIT');
             migradas += 1;
           } catch (rowErr) {
@@ -342,6 +328,9 @@ module.exports = async function migrateChannels(ctx = {}) {
     await new Promise((resolve, reject) => cursor.close(err => (err ? reject(err) : resolve())));
     const secs = ((Date.now() - startedAt) / 1000).toFixed(1);
     console.log(`✅ Migrados ${migradas}/${total} canais em ${secs}s. (${ignoradasTipo} ignorados por tipo, ${erros} com erro)`);
+    if (erros > 0) {
+      throw new Error(`Migração de canais finalizou com ${erros} erro(s).`);
+    }
   } finally {
     await source.end();
     await dest.end();
@@ -352,4 +341,10 @@ module.exports = async function migrateChannels(ctx = {}) {
 function safeName(name, id) {
   const n = (name || '').toString().trim();
   return n.length ? n : `Canal ${id}`;
+}
+function jsonColumnCast(columnName, typesMap) {
+  const t = String(typesMap.get(columnName) || '').toLowerCase();
+  if (t === 'jsonb') return '::jsonb';
+  if (t === 'json') return '::json';
+  return '';
 }

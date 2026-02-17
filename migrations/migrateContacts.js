@@ -73,32 +73,40 @@ module.exports = async function migrateContacts(ctx = {}) {
       channelsByContact.rows.map(r => [r.contactId, r.channel_ids || []])
     );
 
-    // --- 3) UPSERT preparado
+    // --- 3) Detecta schema do destino e prepara UPSERT dinâmico
+    const contactColsRes = await dest.query(`
+      SELECT column_name, data_type
+      FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'contacts'
+    `);
+    const contactCols = new Set(contactColsRes.rows.map(r => r.column_name));
+    const contactTypes = new Map(contactColsRes.rows.map(r => [r.column_name, r.data_type]));
+    const jidColumn = contactCols.has('j_id') ? 'j_id' : (contactCols.has('jid') ? 'jid' : null);
+    if (!jidColumn) {
+      throw new Error('Tabela contacts sem coluna j_id/jid.');
+    }
+
+    const candidateColumns = [
+      'id', 'name', 'phone_number', jidColumn, 'telephone_number', 'whatsapp',
+      'instagram', 'instagram_id', 'telegram', 'messenger', 'email', 'profile_pic_url', 'push_name',
+      'is_wa_contact', 'is_group', 'type', 'cpf', 'cnpj', 'birth_date',
+      'address', 'annotations', 'channel_id', 'company_id', 'created_at', 'updated_at',
+      'tags', 'channel_assignments'
+    ];
+    const insertColumns = candidateColumns.filter(col => contactCols.has(col));
+    const updatableColumns = insertColumns.filter(col => col !== 'id' && col !== 'created_at');
+    const columnsSql = insertColumns.join(', ');
+    const tupleSql = insertColumns
+      .map((col, idx) => `$${idx + 1}${jsonColumnCast(col, contactTypes)}`)
+      .join(', ');
+    const setSql = updatableColumns.length
+      ? updatableColumns.map(col => `${col} = EXCLUDED.${col}`).join(', ')
+      : 'id = EXCLUDED.id';
     const upsertSql = `
-      INSERT INTO contacts (
-        id, name, phone_number, j_id, telephone_number, whatsapp,
-        instagram, instagram_id, telegram, messenger, email, profile_pic_url, push_name,
-        is_wa_contact, is_group, type, cpf, cnpj, birth_date,
-        address, annotations, channel_id, company_id, created_at, updated_at,
-        tags, channel_assignments
-      )
-      VALUES (
-        $1, $2, $3, $4, NULL, $5,
-        $6, $7, $8, $9, $10, $11, $12,
-        $13, $14, $15, $16, $17, $18,
-        $19, $20, $21, $22, $23,
-        $24::jsonb, $25::jsonb
-      )
-      ON CONFLICT (id) DO UPDATE SET
-        name=EXCLUDED.name, phone_number=EXCLUDED.phone_number, j_id=EXCLUDED.j_id,
-        whatsapp=EXCLUDED.whatsapp, instagram=EXCLUDED.instagram, instagram_id=EXCLUDED.instagram_id, telegram=EXCLUDED.telegram,
-        messenger=EXCLUDED.messenger, email=EXCLUDED.email, profile_pic_url=EXCLUDED.profile_pic_url,
-        push_name=EXCLUDED.push_name, is_wa_contact=EXCLUDED.is_wa_contact, is_group=EXCLUDED.is_group,
-        type=EXCLUDED.type, cpf=EXCLUDED.cpf, cnpj=EXCLUDED.cnpj, birth_date=EXCLUDED.birth_date,
-        address=EXCLUDED.address, annotations=EXCLUDED.annotations, channel_id=EXCLUDED.channel_id, company_id=EXCLUDED.company_id,
-        tags=EXCLUDED.tags, channel_assignments=EXCLUDED.channel_assignments, updated_at=EXCLUDED.updated_at
+      INSERT INTO contacts (${columnsSql})
+      VALUES (${tupleSql})
+      ON CONFLICT (id) DO UPDATE SET ${setSql}
     `;
-    const upsertNamed = { name: 'upsert_contact', text: upsertSql };
 
     // --- 4) Transação + desempenho
     await dest.query('BEGIN');
@@ -136,37 +144,39 @@ module.exports = async function migrateContacts(ctx = {}) {
         .filter(Number.isInteger)
         .map(tagId => ({ tag: tagId, auto_assign: false }));
 
-      await dest.query({
-        ...upsertNamed,
-        values: [
-          contactId,
-          row.name || `Contato ${contactId}`,
-          phoneNumber,
-          jId,
-          whatsapp,
-          row.instagramPK?.toString() ?? null,
-          row.instagramPK?.toString() ?? null,
-          row.telegramId?.toString() ?? null,
-          row.messengerId || null,
-          row.email || null,
-          row.profilePicUrl || null,
-          row.pushname || null,
-          isWaContact,
-          isGroup,
-          type,
-          row.cpf || null,
-          row.cnpj || null,
-          row.dataNascimento || null, // se quiser, troque por parseDate seguro
-          address || '',
-          '',
-          primaryChannelId,
-          row.tenantId,
-          row.createdAt,
-          row.updatedAt,
-          JSON.stringify(tags),
-          JSON.stringify(channelAssignments)
-        ]
-      });
+      const valuesByColumn = {
+        id: contactId,
+        name: row.name || `Contato ${contactId}`,
+        phone_number: phoneNumber,
+        [jidColumn]: jId,
+        telephone_number: null,
+        whatsapp,
+        instagram: row.instagramPK?.toString() ?? null,
+        instagram_id: row.instagramPK?.toString() ?? null,
+        telegram: row.telegramId?.toString() ?? null,
+        messenger: row.messengerId || null,
+        email: row.email || null,
+        profile_pic_url: row.profilePicUrl || null,
+        push_name: row.pushname || null,
+        is_wa_contact: isWaContact,
+        is_group: isGroup,
+        type,
+        cpf: row.cpf || null,
+        cnpj: row.cnpj || null,
+        birth_date: row.dataNascimento || null,
+        address: address || '',
+        annotations: '',
+        channel_id: primaryChannelId,
+        company_id: row.tenantId,
+        created_at: row.createdAt,
+        updated_at: row.updatedAt,
+        tags: JSON.stringify(tags),
+        channel_assignments: JSON.stringify(channelAssignments)
+      };
+      const values = insertColumns.map(col =>
+        Object.prototype.hasOwnProperty.call(valuesByColumn, col) ? valuesByColumn[col] : null
+      );
+      await dest.query(upsertSql, values);
 
       migrados++;
       if (migrados % LOG_EVERY === 0 || migrados === total) {
@@ -192,3 +202,9 @@ module.exports = async function migrateContacts(ctx = {}) {
 // helpers
 function onlyDigits(v) { if (v == null) return null; return String(v).replace(/\D+/g, ''); }
 function truncate(v, max) { if (v == null) return v; const s = String(v); return s.length > max ? s.slice(0, max) : s; }
+function jsonColumnCast(columnName, typesMap) {
+  const t = String(typesMap.get(columnName) || '').toLowerCase();
+  if (t === 'jsonb') return '::jsonb';
+  if (t === 'json') return '::json';
+  return '';
+}
